@@ -1,0 +1,59 @@
+# Fugu – default configuration
+# Override any value via FUGU_ environment variables
+# (e.g. FUGU_PLANNER__BASE_MODEL=my-model)
+
+worker:
+  qwen_url: "http://localhost:8001/v1"
+  gemma_url: "http://localhost:8002/v1"
+  ornith_url: "http://localhost:8003/v1"
+  timeout: 120.0
+  max_tokens: 4096
+  temperature: 0.2
+
+repo:
+  workspace_dir: "/tmp/fugu_workspaces"
+  max_disk_mb: 2048
+  cleanup_on_done: true
+
+planner:
+  base_model: "Qwen/Qwen2.5-3B-Instruct"
+  lora_r: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  lora_target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+  load_in_4bit: true
+  max_seq_length: 4096
+
+training:
+  learning_rate: 2.0e-5
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  num_epochs: 3
+  warmup_ratio: 0.1
+  save_steps: 500
+  eval_steps: 250
+  output_dir: "outputs/planner"
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  fp16: false
+  bf16: true
+  logging_steps: 10
+
+buffer:
+  capacity: 100000
+  max_size_mb: 512
+  storage_dir: "data/buffer"
+
+env:
+  max_steps: 20
+  test_timeout_seconds: 300
+  # SAFETY: do not run real third-party SWE-bench on the host.
+  # isolation_mode=docker raises NotImplementedError until a container
+  # executor exists. allow_host_execution=true only for trusted local/mock
+  # path repos — never for untrusted GitHub clones on a shared VM.
+  isolation_mode: host
+  allow_host_execution: false
