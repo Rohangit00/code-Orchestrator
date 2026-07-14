@@ -9,7 +9,7 @@ Small **planner** model that learns to coordinate larger coding **workers**
 |------|--------|
 | Unit tests / local logic | Yes |
 | Controlled **smoke transfer** to an H200 VM | Yes, after clone + install |
-| **Real** third-party SWE-bench collection | **No** — Docker isolation not implemented; do not enable host execution for remote repos |
+| **Real** third-party SWE-bench collection | **Partial** — Fugu docker sandbox exists (`isolation_mode=docker`); not the official SWE-bench harness; smoke `-n 1` first |
 | Full train/eval on H200s | Only after smoke stages pass (see [docs/VM_RUNBOOK.md](docs/VM_RUNBOOK.md)) |
 
 Source of truth for open work: `task.md`, `implementation_issues.md`.
@@ -49,14 +49,15 @@ Worker endpoints (canonical):
 
 ```yaml
 # configs/default.yaml (env section)
-isolation_mode: host          # docker not implemented yet
+isolation_mode: host          # use "docker" for untrusted remotes
 allow_host_execution: false   # refuse untrusted remote test runs on host
+docker_image: "python:3.11-slim"
 ```
 
-- **Real SWE-bench / untrusted remotes:** blocked until a container executor exists
-  (`isolation_mode=docker` currently raises `NotImplementedError`).
-- **Mock / local path repos only** for collection smoke tests.
+- **Untrusted remotes:** set `isolation_mode: docker` (or `FUGU_ENV__ISOLATION_MODE=docker`).
+  Tests/compile run in a container; this is **not** the official SWE-bench harness.
 - Never set `allow_host_execution=true` for third-party GitHub clones on a shared VM.
+- See [docs/VM_START.md](docs/VM_START.md) for collect smoke after docker is enabled.
 
 ## CLI (after install)
 

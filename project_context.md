@@ -47,7 +47,11 @@ Fugu is a coding-oriented LLM orchestrator that learns to coordinate multiple co
 **Isolation**
 
 - `env.isolation_mode`: `host` | `docker`
-- `env.allow_host_execution`: must be `false` for untrusted remote repos until a docker executor exists (`isolation_mode=docker` raises `NotImplementedError` until implemented).
+- `env.allow_host_execution`: must be `false` for untrusted remote repos; use
+  `isolation_mode=docker` so tests/compile run in a container (Fugu sandbox,
+  not the official SWE-bench harness). Docker knobs: `docker_image`,
+  `docker_network`, `docker_memory`, `docker_cpus`, `docker_workdir`,
+  `docker_user`, `docker_extra_args`.
 
 ---
 

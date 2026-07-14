@@ -191,6 +191,13 @@ def main(
             timeout_seconds=cfg.env.test_timeout_seconds,
             isolation_mode=cfg.env.isolation_mode,
             allow_host_execution=cfg.env.allow_host_execution,
+            docker_image=cfg.env.docker_image,
+            docker_network=cfg.env.docker_network,
+            docker_memory=cfg.env.docker_memory,
+            docker_cpus=cfg.env.docker_cpus,
+            docker_workdir=cfg.env.docker_workdir,
+            docker_user=cfg.env.docker_user,
+            docker_extra_args=cfg.env.docker_extra_args,
         )
         reward_calculator = RewardCalculator()
         env = CodingEnvironment(

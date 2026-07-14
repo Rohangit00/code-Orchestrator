@@ -3,8 +3,9 @@
 Controlled smoke only. This is **not** authorization to run real third-party
 SWE-bench collection on the host.
 
-Default config keeps `allow_host_execution: false`. Docker isolation is not
-implemented (`isolation_mode: docker` raises `NotImplementedError`).
+Default config keeps `allow_host_execution: false` and `isolation_mode: host`.
+For untrusted remote SWE-bench clones, set `isolation_mode: docker` so tests
+run in a container (Fugu sandbox — **not** the official SWE-bench harness).
 
 For the full staged checklist, see [VM_RUNBOOK.md](VM_RUNBOOK.md).
 
@@ -33,7 +34,7 @@ pip install -U pip wheel
 | `pip install -e ".[dev]"` | **Yes as a dependency** — install will pull `torch` unless already satisfied here |
 | Planner CUDA smoke / `fugu-train` | **Yes** |
 | `fugu-collect` with external vLLM workers | Workers are separate processes; full package install still expects torch in the Fugu env |
-| Real SWE-bench on host | **Blocked by isolation**, not by torch |
+| Real SWE-bench tests on host | **Blocked** — use `isolation_mode=docker` instead |
 
 **System or another venv’s torch does not count.** A normal venv is isolated:
 torch on the machine is invisible until it is installed into *this* `.venv`
@@ -187,18 +188,34 @@ There is no project lockfile yet — keep this freeze for reproducibility.
 
 ---
 
-## Do not do yet
+## Collect smoke (after workers + docker)
+
+Fugu docker isolation sandboxes **test/compile** only. It does not match the
+official SWE-bench evaluation harness (per-instance images / FAIL_TO_PASS).
+Many instances may fail inside a slim image for missing deps — that is env
+fidelity, not a broken sandbox.
 
 ```bash
-# Unsafe for untrusted remotes — keep this off
-# allow_host_execution: true
+# 1. Image available
+docker pull python:3.11-slim   # or a richer image with project deps
 
-# Also blocked: isolation_mode: docker → NotImplementedError
-fugu-collect -d swebench-lite -n 1   # real remote collection not ready
+# 2. Same shell as worker URL exports
+export FUGU_ENV__ISOLATION_MODE=docker
+export FUGU_ENV__ALLOW_HOST_EXECUTION=false
+export FUGU_ENV__DOCKER_IMAGE=python:3.11-slim
+
+# 3. Single-task smoke only first
+fugu-collect \
+  -c configs/default.yaml \
+  -d swebench-lite \
+  -s single-qwen \
+  -n 1 \
+  -o data/buffer_smoke
 ```
 
-Mock collect → train → eval is not a one-command CLI path yet. Treat
-**install + pytest + optional CUDA/vLLM** as the start path.
+Do **not** set `allow_host_execution=true` for third-party GitHub clones.
+
+Scale `-n` only after logs show containerized tests and a buffer file appears.
 
 ---
 

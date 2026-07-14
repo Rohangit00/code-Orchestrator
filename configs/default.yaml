@@ -51,9 +51,17 @@ buffer:
 env:
   max_steps: 20
   test_timeout_seconds: 300
-  # SAFETY: do not run real third-party SWE-bench on the host.
-  # isolation_mode=docker raises NotImplementedError until a container
-  # executor exists. allow_host_execution=true only for trusted local/mock
-  # path repos — never for untrusted GitHub clones on a shared VM.
+  # SAFETY: do not run real third-party SWE-bench tests on the host.
+  # For remote GitHub clones set isolation_mode=docker (Fugu container
+  # sandbox — not the official SWE-bench evaluation harness).
+  # allow_host_execution=true only for trusted local/mock path repos.
   isolation_mode: host
   allow_host_execution: false
+  # Used when isolation_mode=docker
+  docker_image: "python:3.11-slim"
+  docker_network: "none"
+  docker_memory: "4g"
+  docker_cpus: "2"
+  docker_workdir: "/workspace"
+  docker_user: ""
+  docker_extra_args: []

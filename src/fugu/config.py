@@ -86,12 +86,21 @@ class EnvConfig(BaseModel):
 
     max_steps: int = 20
     test_timeout_seconds: int = 300
-    # "host" for trusted local/mock only; "docker" required for real third-party
-    # repos (executor not implemented yet — raises NotImplementedError).
+    # "host" for trusted local/mock only; "docker" for third-party remote
+    # repos (runs tests/compile inside a container — not the official
+    # SWE-bench harness).
     isolation_mode: str = "host"
     # Default False: refuse untrusted remote test execution on the host.
     # Set True only for trusted local path / mock fixtures.
     allow_host_execution: bool = False
+    # Docker executor settings (used when isolation_mode == "docker")
+    docker_image: str = "python:3.11-slim"
+    docker_network: str = "none"
+    docker_memory: str = "4g"
+    docker_cpus: str = "2"
+    docker_workdir: str = "/workspace"
+    docker_user: str = ""
+    docker_extra_args: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

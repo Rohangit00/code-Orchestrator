@@ -24,7 +24,7 @@ work order), `task.md` (checklist).
 | 9 | Train/infer prompt mismatch | **FIXED** |
 | 10 | Approximate multi-token action probs | **Open** (defer to RL) |
 | 11 | BC of heuristics ≠ quality routing | **Partial** (light filter) |
-| 12 | Untrusted tests on host | **Partial** (gate; no docker yet) |
+| 12 | Untrusted tests on host | **Done** (gate + docker sandbox; not official harness) |
 | 13 | Blocking work in async env | **Open** (sequential OK for now) |
 | 14 | Disk budget not enforced | **Partial** (cleanup only) |
 | 15 | Worker port doc mismatch | **FIXED** |
@@ -126,13 +126,18 @@ Standalone datasets lack `repo_url` / git patches.
 - **Still open:** Same-task worker comparisons, return-weighted BC,
   preference losses, online RL.
 
-### 12. Untrusted repository tests execute on the host — PARTIAL (gated)
+### 12. Untrusted repository tests execute on the host — DONE (Fugu sandbox)
 
-- **Gate done:** `EnvConfig.isolation_mode` (`host`|`docker`) and
+- **Gate:** `EnvConfig.isolation_mode` (`host`|`docker`) and
   `allow_host_execution`. Untrusted remote URLs raise `IsolationError` when
-  host execution is disabled. CLI wires these into `TestRunner`.
-- **Still open:** Real docker/container executor (`NotImplementedError` if
-  `isolation_mode=docker`). **Required before real third-party SWE-bench.**
+  host execution is disabled.
+- **Docker executor:** `TestRunner` runs tests/compile via `docker run`
+  (network none, cap-drop, memory/cpu limits, mount workspace). Config knobs:
+  `docker_image`, `docker_network`, `docker_memory`, `docker_cpus`,
+  `docker_workdir`, `docker_user`, `docker_extra_args`.
+- **Not included:** Official SWE-bench per-instance harness / FAIL_TO_PASS
+  grading. Use richer `docker_image` or integrate the harness later for
+  leaderboard fidelity.
 
 ### 13. Blocking subprocess work inside async env — OPEN
 
@@ -189,28 +194,27 @@ Full package install: `pip install -e ".[dev]"` (pulls torch/transformers).
 
 ## Deployment readiness
 
-**Not ready for real H200 SWE-bench collection.** Ready only for a controlled
-smoke-test transfer after this tree is **committed and cloned**.
+**Docker sandbox is implemented.** Real remote collection still needs a careful
+`-n 1` smoke (workers up, image pulled, isolation_mode=docker). Official
+SWE-bench harness fidelity is a separate follow-on.
 
-Blockers for real GPU-VM collection:
+Remaining operational caveats:
 
-1. Docker isolation not implemented (`NotImplementedError`); host execution of
-   untrusted remotes must stay off (`allow_host_execution: false` default).
-2. No vLLM launch automation — operators must start workers on 8001–8003.
+1. Host execution of untrusted remotes must stay off (`allow_host_execution: false`).
+2. No vLLM launch automation — operators must start workers themselves.
 3. No CUDA/PyTorch lockfile — validate stack on the VM before large downloads.
-4. Mock collect → train → eval not yet demonstrated end-to-end.
+4. Full collect → train → eval at scale not yet demonstrated end-to-end.
 
-See **README.md** and **docs/VM_RUNBOOK.md**.
+See **README.md**, **docs/VM_START.md**, and **docs/VM_RUNBOOK.md**.
 
 ## Remaining work (ordered)
 
-1. Commit + transfer (git or deliberate archive) — not an empty initial commit.
-2. VM staged smoke per `docs/VM_RUNBOOK.md` (install, pytest, CUDA, vLLM health).
-3. **Mock / local E2E** — collect → buffer → 10-step train → eval.
-4. **#12 docker** — container executor before any real remote SWE-bench.
-5. **#14 full** — enforce disk budget when sweeping many repos.
-6. **#11 heavy** — quality routing after first SFT baseline.
-7. **#10, #13** — when starting RL or concurrent collection.
+1. VM staged smoke + `fugu-collect -n 1` under docker isolation.
+2. **Mock / local E2E** — collect → buffer → 10-step train → eval.
+3. Richer images or **official SWE-bench harness** for resolve fidelity.
+4. **#14 full** — enforce disk budget when sweeping many repos.
+5. **#11 heavy** — quality routing after first SFT baseline.
+6. **#10, #13** — when starting RL or concurrent collection.
 
 ---
 

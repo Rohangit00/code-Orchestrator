@@ -18,7 +18,7 @@ See `implementation_issues.md`, `project_context.md`, `task.md`, and
 | #15 worker ports | **Done** (8001/8002/8003) |
 | #14 basic cleanup | **Done** (try/finally; estimates deferred) |
 | #9 + #11 light prompts/filter | **Done** |
-| #12 isolation gate | **Done** (docker executor still TODO) |
+| #12 isolation gate + docker sandbox | **Done** (not official SWE-bench harness) |
 | #10, #11 heavy, #13, #14 full | **Deferred** |
 
 ---

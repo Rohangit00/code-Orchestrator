@@ -11,11 +11,11 @@ real third-party SWE-bench collection on the host.
 
 1. Code is on the VM via **git clone/pull of a commit that contains this tree**
    (not the empty initial commit alone).
-2. Docker (or other) isolation is **implemented** — today
-   `isolation_mode=docker` raises `NotImplementedError`.
+2. Docker isolation is enabled for remotes (`isolation_mode=docker`) and a
+   single-task smoke has been inspected (Fugu sandbox ≠ official harness).
 3. CUDA-compatible **PyTorch / bitsandbytes / vLLM** versions are validated on
    the H200 image.
-4. Mock **collect → buffer → train → eval** has been demonstrated on the VM.
+4. Mock or real **collect → buffer → train → eval** has been demonstrated on the VM.
 
 Default config **must keep** `allow_host_execution: false` for remote repos.
 
@@ -183,21 +183,39 @@ as the minimum VM smoke bar.
 
 ---
 
-## Stage 6 — Real SWE-bench (blocked)
+## Stage 6 — Real SWE-bench (docker sandbox)
 
-**Do not run** real third-party SWE-bench collection with:
+**Do not** run untrusted tests on the host:
 
 ```yaml
 isolation_mode: host
-allow_host_execution: true   # unsafe for untrusted repos
+allow_host_execution: true   # unsafe for untrusted repos — never for GitHub clones
 ```
 
-Required first:
+### Fugu docker isolation vs official harness
 
-1. Implement container executor in `TestRunner` (`isolation_mode=docker`).
-2. Set `allow_host_execution: false` and `isolation_mode: docker`.
-3. Re-run a single Lite task under isolation; inspect trajectories manually.
-4. Only then scale collect → train → eval.
+| Fugu (`isolation_mode=docker`) | Official SWE-bench harness |
+|--------------------------------|----------------------------|
+| Sandbox for *our* test command / reward | Leaderboard-true resolve grading |
+| Generic or user-chosen image (`docker_image`) | Per-repo/env prebuilt images |
+| Enough to collect planner trajectories safely | Required for paper-faithful eval metrics |
+
+### Enable and smoke
+
+```bash
+docker pull python:3.11-slim
+export FUGU_ENV__ISOLATION_MODE=docker
+export FUGU_ENV__ALLOW_HOST_EXECUTION=false
+export FUGU_ENV__DOCKER_IMAGE=python:3.11-slim
+# keep FUGU_WORKER__*_URL exports
+
+fugu-collect -c configs/default.yaml -d swebench-lite -s single-qwen -n 1 -o data/buffer_smoke
+```
+
+1. Confirm logs show docker execution (not host shell for tests).
+2. Inspect `data/buffer_smoke/buffer.jsonl`.
+3. Expect many env/dep failures on slim images — isolation can still be correct.
+4. Only then scale `-n` / multi-strategy.
 
 ---
 
@@ -210,7 +228,7 @@ Required first:
 - [ ] Planner 4-bit load succeeds
 - [ ] vLLM on 8001/8002/8003; `/v1/models` OK
 - [ ] Mock / local E2E path demonstrated
-- [ ] Docker isolation implemented **before** real SWE-bench
+- [ ] Docker isolation enabled; `-n 1` collect smoke inspected
 - [ ] Record `pip freeze` / CUDA stack for reproducibility
 
 ---

@@ -92,4 +92,5 @@
 - [ ] #10 — Full-sequence action probabilities (needed for RL, not SFT)
 - [ ] #13 — Offload blocking subprocess work for concurrent collection
 - [ ] #14 full — Enforce `max_disk_mb` estimates at scale
-- [ ] #12 docker — Implement container executor for real third-party SWE-bench
+- [x] #12 docker — Fugu container executor (`isolation_mode=docker`; not official harness)
+- [ ] Official SWE-bench harness / per-instance images (eval fidelity)
