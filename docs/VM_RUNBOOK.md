@@ -248,16 +248,24 @@ export FUGU_WORKER__ORNITH_URL=http://HOST:PORT/v1
 
 Or edit `configs/default.yaml` / a VM-specific YAML and pass `-c` to the CLI.
 
-Confirm Fugu sees overrides:
+Confirm **Fugu** sees overrides (not only `echo` — the CLI uses
+`FuguConfig.from_yaml`, which must apply `FUGU_*` over YAML):
 
 ```bash
+# exports must already be set in this shell
 python - <<'PY'
 from fugu.config import FuguConfig
 c = FuguConfig.from_yaml("configs/default.yaml")
-print(c.worker.qwen_url, c.worker.gemma_url, c.worker.ornith_url)
-print(c.env.isolation_mode, c.env.allow_host_execution, c.env.docker_image)
+print("workers:", c.worker.qwen_url, c.worker.gemma_url, c.worker.ornith_url)
+print("isolation_mode:", c.env.isolation_mode)  # must be docker for remotes
+print("allow_host_execution:", c.env.allow_host_execution)
+print("docker_image:", c.env.docker_image)
 PY
 ```
+
+If `echo $FUGU_ENV__ISOLATION_MODE` is `docker` but this prints `host`, you are
+on a build where YAML overrode env — pull the config fix, or edit
+`configs/default.yaml` / a VM YAML to set `isolation_mode: docker`.
 
 ---
 
@@ -364,16 +372,136 @@ fugu-collect \
 ### After it finishes — inspect
 
 ```bash
+# Use the same cwd as the collect run (path is relative unless -o was absolute)
+pwd
 ls -la data/buffer_smoke/
-wc -l data/buffer_smoke/buffer.jsonl
-head -c 500 data/buffer_smoke/buffer.jsonl
+ls -la data/buffer_smoke/buffer.jsonl
+file data/buffer_smoke/buffer.jsonl
 ```
 
 | Good signs | Not necessarily a bug |
 |------------|------------------------|
 | No `IsolationError` / no `NotImplementedError` | Tests fail inside container (slim image missing deps) |
-| Logs show docker test execution | Worker returns a weak/empty patch |
-| `buffer.jsonl` exists with lines | Low “solved” rate on first task |
+| Logs show docker test execution | Worker returns a weak/empty patch; `git apply failed` |
+| Summary **Transitions collected > 0** | Low “solved” rate on first task |
+| `buffer.jsonl` exists and has non-trivial size | Editor cannot open the file as text (see below) |
+
+### Buffer file format (cannot open as text)
+
+The CLI writes:
+
+```text
+<data/buffer_smoke>/buffer.jsonl
+```
+
+**Name is misleading.** Contents are **not** JSON lines. `ReplayBuffer.save()`
+writes a **binary** format:
+
+```text
+8 bytes  magic  FUGU_RB\0
+4 bytes  version
+4 bytes  entry count
+then: length-prefixed zstd-compressed msgpack transitions
+```
+
+| File | Format | Open in text editor? |
+|------|--------|----------------------|
+| `buffer.jsonl` (Fugu save) | Binary `FUGU_RB` | **No** — looks corrupted / garbage |
+| Export below (`buffer_readable.json`) | Real JSON | **Yes** |
+
+Quick magic check:
+
+```bash
+xxd data/buffer_smoke/buffer.jsonl | head
+# first bytes should be: 46 55 47 55 5f 52 42 00  = "FUGU_RB\0"
+```
+
+**`data/` is gitignored** — IDEs often grey out the folder. That does not mean
+the files are missing. Prefer terminal `ls` from the collect cwd. If “No such
+file”, you are often in the wrong directory; try:
+
+```bash
+find ~ -name 'buffer.jsonl' 2>/dev/null | head
+```
+
+### View / dump the buffer (Python)
+
+```bash
+source .venv/bin/activate
+
+python - <<'PY'
+from pathlib import Path
+from fugu.buffer.replay_buffer import ReplayBuffer
+
+path = Path("data/buffer_smoke/buffer.jsonl")  # adjust if needed
+buf = ReplayBuffer(capacity=10_000, storage_dir=str(path.parent))
+buf.load(str(path))
+
+print("transitions:", len(buf))
+n = len(buf)
+batch = buf.sample(n) if n else []
+for i, t in enumerate(batch):
+    act = t.action.name if hasattr(t.action, "name") else t.action
+    patch = (t.metadata.patch or "")[:80].replace("\n", "\\n")
+    print(
+        f"[{i}] action={act} reward={t.reward:.4f} done={t.done} "
+        f"worker={t.metadata.worker_name!r} "
+        f"tokens={t.metadata.tokens_used} patch_preview={patch!r}"
+    )
+PY
+```
+
+Export real JSON for the editor:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+from fugu.buffer.replay_buffer import ReplayBuffer
+
+path = Path("data/buffer_smoke/buffer.jsonl")
+buf = ReplayBuffer(capacity=10_000, storage_dir=str(path.parent))
+buf.load(str(path))
+out = path.with_name("buffer_readable.json")
+data = [t.to_dict() for t in buf.sample(len(buf))] if len(buf) else []
+out.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+print("wrote", out, "count=", len(data))
+PY
+```
+
+Then open `data/buffer_smoke/buffer_readable.json` in the text editor.
+
+`fugu-train -b data/buffer_smoke` loads the **binary** buffer via the same
+`ReplayBuffer` API — you do **not** need the readable JSON for training.
+
+### Do not overwrite good runs
+
+Collect **always saves at the end**, even if this run got **0 transitions**
+(e.g. `CalledProcessError` on clone). Reusing the same `-o` **replaces**
+`buffer.jsonl` and can wipe a previous good file.
+
+Prefer a unique output dir each smoke:
+
+```bash
+fugu-collect \
+  -c configs/default.yaml \
+  -d swebench-lite \
+  -s single-qwen \
+  -n 1 \
+  -o "data/buffer_smoke_$(date +%Y%m%d_%H%M%S)"
+```
+
+Or absolute path so location is unambiguous:
+
+```bash
+-o "$(pwd)/data/buffer_smoke_$(date +%Y%m%d_%H%M%S)"
+```
+
+Log the run:
+
+```bash
+fugu-collect ... 2>&1 | tee collect_run.log
+```
 
 ### Then scale carefully
 
@@ -390,8 +518,13 @@ produce clean trajectories.
 |---------|--------|
 | Empty exports after new terminal | Re-export or `source env_vm.sh` |
 | `Docker binary not found` | `docker` on PATH; daemon running; `docker info` |
-| Still host `IsolationError` | `echo $FUGU_ENV__ISOLATION_MODE` → must be `docker` |
+| Still host `IsolationError` | Confirm **Fugu** sees docker (not only `echo`): see Stage 4 Python check |
+| `echo` says docker but IsolationError | YAML used to beat env; set `isolation_mode: docker` in YAML and/or pull config fix |
 | Worker timeouts / empty patches | `curl $FUGU_WORKER__QWEN_URL/models`; URL ends with `/v1` |
+| `git apply failed` / exit 128 | Worker patch not a clean unified diff — episode may still record transitions |
+| `CalledProcessError`, 0 transitions | Failed early (often git clone/fetch); buffer save may overwrite prior run |
+| Cannot open `buffer.jsonl` in editor | **Expected** — binary format; use Python dump above |
+| Greyed-out `data/` in IDE | **Expected** — gitignored; use `ls` / `find` |
 | `No module named vllm` when *starting* servers | Install/activate a venv that has vLLM (not required if workers already up) |
 | HF / disk errors | network, `HF_HOME`, free disk |
 | Mount permission errors | `export FUGU_ENV__DOCKER_USER="$(id -u):$(id -g)"` |

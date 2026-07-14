@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +111,15 @@ class EnvConfig(BaseModel):
 class FuguConfig(BaseSettings):
     """Top-level configuration for the Fugu orchestrator.
 
-    Values are resolved in order:
-    1. Explicit constructor args.
-    2. Environment variables with ``FUGU_`` prefix (nested fields use ``__``
-       as separator, e.g. ``FUGU_PLANNER__BASE_MODEL``).
-    3. Defaults declared above.
+    Values are resolved in order (highest priority first):
+
+    1. Environment variables with ``FUGU_`` prefix (nested fields use ``__``,
+       e.g. ``FUGU_ENV__ISOLATION_MODE``).
+    2. Values from YAML when using :meth:`from_yaml` (passed as init kwargs).
+    3. Field defaults declared above.
+
+    Note: pydantic-settings defaults to init-over-env; we invert that via
+    ``settings_customise_sources`` so ``FUGU_*`` always wins over YAML.
     """
 
     model_config = SettingsConfigDict(
@@ -130,6 +134,24 @@ class FuguConfig(BaseSettings):
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     env: EnvConfig = Field(default_factory=EnvConfig)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Env must beat YAML/init so FUGU_ENV__ISOLATION_MODE=docker works
+        # even when configs/default.yaml still says isolation_mode: host.
+        return (
+            env_settings,
+            init_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> FuguConfig:
