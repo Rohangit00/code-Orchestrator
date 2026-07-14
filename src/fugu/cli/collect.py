@@ -57,16 +57,18 @@ _DATASET_MAP: dict[str, tuple[str, str, dict]] = {
 
 _SUPPORTED_DATASETS = tuple(_DATASET_MAP.keys())
 
-# Strategy name → loader key
-_STRATEGY_MAP: dict[str, str] = {
-    "all": "all",
-    "single-qwen": "single-qwen",
-    "single-gemma": "single-gemma",
-    "single-ornith": "single-ornith",
-    "round-robin": "round-robin",
-    "retry-on-fail": "retry-on-fail",
-    "verify-first": "verify-first",
-}
+# CLI strategy flags (must match click.Choice below).
+# Note: strategy.name on objects is often longer, e.g.
+# single-qwen → SingleWorkerStrategy.name == "single_worker_call_qwen".
+_STRATEGY_CLI_CHOICES = (
+    "all",
+    "single-qwen",
+    "single-gemma",
+    "single-ornith",
+    "round-robin",
+    "retry-on-fail",
+    "verify-first",
+)
 
 
 def _load_dataset(name: str):
@@ -80,23 +82,61 @@ def _load_dataset(name: str):
 
 
 def _load_strategies(strategy_name: str):
-    """Return one or more strategy objects based on the CLI argument."""
-    from fugu.trajectory.strategies import ALL_STRATEGIES
+    """Return one or more strategy objects based on the CLI argument.
 
-    if strategy_name == "all":
-        return ALL_STRATEGIES
+    CLI names (``single-qwen``, ``retry-on-fail``, …) are mapped explicitly.
+    Matching only on ``strategy.name`` fails because those names are longer
+    (e.g. ``single_worker_call_qwen``).
+    """
+    from fugu.core.actions import PlannerAction
+    from fugu.trajectory.strategies import (
+        ALL_STRATEGIES,
+        RoundRobinStrategy,
+        RetryOnFailStrategy,
+        SingleWorkerStrategy,
+        VerifyFirstStrategy,
+    )
 
-    # Find the matching strategy by name
+    key = strategy_name.strip().lower().replace("_", "-")
+
+    if key == "all":
+        return list(ALL_STRATEGIES)
+
+    factories = {
+        "single-qwen": lambda: SingleWorkerStrategy(
+            PlannerAction.CALL_QWEN, max_retries=2
+        ),
+        "single-gemma": lambda: SingleWorkerStrategy(
+            PlannerAction.CALL_GEMMA, max_retries=2
+        ),
+        "single-ornith": lambda: SingleWorkerStrategy(
+            PlannerAction.CALL_ORNITH, max_retries=2
+        ),
+        "round-robin": RoundRobinStrategy,
+        "retry-on-fail": lambda: RetryOnFailStrategy(
+            primary_action=PlannerAction.CALL_QWEN,
+            max_retries=2,
+            fallback_actions=[
+                PlannerAction.CALL_GEMMA,
+                PlannerAction.CALL_ORNITH,
+            ],
+        ),
+        "verify-first": lambda: VerifyFirstStrategy(PlannerAction.CALL_QWEN),
+    }
+
+    if key in factories:
+        return [factories[key]()]
+
+    # Fallback: match internal strategy.name (hyphenated)
     for s in ALL_STRATEGIES:
-        if getattr(s, "name", "").replace("_", "-") == strategy_name:
+        if getattr(s, "name", "").replace("_", "-") == key:
             return [s]
 
-    # Fallback: return all
     console.print(
         f"[yellow]Warning:[/yellow] Strategy '{strategy_name}' not found, "
         "using all strategies.",
     )
-    return ALL_STRATEGIES
+    return list(ALL_STRATEGIES)
 
 
 @click.command()
@@ -123,17 +163,7 @@ def _load_strategies(strategy_name: str):
 @click.option(
     "--strategy",
     "-s",
-    type=click.Choice(
-        [
-            "all",
-            "single-qwen",
-            "single-gemma",
-            "single-ornith",
-            "round-robin",
-            "retry-on-fail",
-            "verify-first",
-        ]
-    ),
+    type=click.Choice(list(_STRATEGY_CLI_CHOICES)),
     default="all",
     help="Collection strategy to use.",
 )

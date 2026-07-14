@@ -327,7 +327,7 @@ fugu-collect \
 | `fugu-collect` | Drive coding env with fixed strategies; write transitions to a buffer |
 | `-c configs/default.yaml` | Load YAML defaults; **env exports still override** workers / isolation |
 | `-d swebench-lite` | Dataset: SWE-bench Lite (Hugging Face) |
-| `-s single-qwen` | Strategy: CALL_QWEN → RETRY* → STOP (not all workers / not `all`) |
+| `-s single-qwen` | Strategy: CALL_QWEN → RETRY* → STOP (not all workers / not `all`). Must be this CLI name (not `single_worker_call_qwen`) |
 | `-n 1` | **One task only** (smoke). Scale only after this looks sane |
 | `-o data/buffer_smoke` | Output dir for `buffer.jsonl` |
 
