@@ -1,5 +1,9 @@
 # H200 VM runbook — Fugu smoke path
 
+**First time on the VM?** Use the shorter [VM_START.md](VM_START.md) (install,
+torch in this venv, pytest, optional CUDA/vLLM). This runbook is the full
+staged checklist.
+
 This is a **controlled smoke-test** procedure. It is **not** authorization to run
 real third-party SWE-bench collection on the host.
 

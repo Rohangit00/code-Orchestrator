@@ -73,6 +73,7 @@ Datasets for collect/eval: **SWE-bench only** (`swebench-lite`, `swebench-full`,
 
 | Doc | Purpose |
 |-----|---------|
+| [docs/VM_START.md](docs/VM_START.md) | **Start here on the VM** — install, torch/venv, pytest, optional CUDA/vLLM |
 | [docs/VM_RUNBOOK.md](docs/VM_RUNBOOK.md) | H200 VM staged smoke (install → pytest → CUDA → vLLM → mock E2E) |
 | `explanation.md` | Design / MDP motivation |
 | `implementation_plan.md` | Full architecture plan |
