@@ -63,14 +63,16 @@ class SWEBenchDataset(BaseDataset):
         """Load the HuggingFace dataset on first access."""
         if self._dataset is not None:
             return
-        from datasets import load_dataset
+        from fugu.datasets.hf_load import load_dataset_script_free
 
         logger.info(
             "Loading SWE-bench dataset '%s' (split=%s) …",
             self._hf_dataset_path,
             self._hf_split,
         )
-        self._dataset = load_dataset(
+        # SWE-bench Lite/Full ship parquet (script-free). Helper falls back
+        # if a mirror still only provides a loading script.
+        self._dataset = load_dataset_script_free(
             self._hf_dataset_path, split=self._hf_split
         )
         logger.info("Loaded %d instances.", len(self._dataset))

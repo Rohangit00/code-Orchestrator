@@ -23,6 +23,37 @@ SplitName = Literal["train", "val", "test", "all"]
 # Default: lite generation set used by LiveCodeBench releases.
 _DEFAULT_HF = "livecodebench/code_generation_lite"
 
+# Optional release → Hub JSONL files (top-level in code_generation_lite).
+# cumulative: later releases include earlier problems via multiple files.
+_RELEASE_TO_JSONL: dict[str, list[str] | None] = {
+    "": None,  # all top-level jsonl
+    "all": None,
+    "release_v1": ["test.jsonl"],
+    "v1": ["test.jsonl"],
+    "release_v2": ["test.jsonl", "test2.jsonl"],
+    "v2": ["test.jsonl", "test2.jsonl"],
+    "release_v3": ["test.jsonl", "test2.jsonl", "test3.jsonl"],
+    "v3": ["test.jsonl", "test2.jsonl", "test3.jsonl"],
+    "release_v4": ["test.jsonl", "test2.jsonl", "test3.jsonl", "test4.jsonl"],
+    "v4": ["test.jsonl", "test2.jsonl", "test3.jsonl", "test4.jsonl"],
+    "release_v5": [
+        "test.jsonl",
+        "test2.jsonl",
+        "test3.jsonl",
+        "test4.jsonl",
+        "test5.jsonl",
+    ],
+    "v5": [
+        "test.jsonl",
+        "test2.jsonl",
+        "test3.jsonl",
+        "test4.jsonl",
+        "test5.jsonl",
+    ],
+    "release_v6": None,  # all files including test6
+    "v6": None,
+}
+
 _PYTEST_HARNESS = '''\
 """Auto-generated public-test harness for LiveCodeBench-style tasks."""
 from __future__ import annotations
@@ -164,29 +195,30 @@ class LiveCodeBenchDataset(BaseDataset):
         )
 
     def _load_rows(self) -> list[dict[str, Any]]:
-        from datasets import load_dataset
+        """Load LCB rows without dataset scripts (datasets 4+ compatible).
+
+        Hub layout (code_generation_lite): top-level ``test.jsonl``,
+        ``test2.jsonl``, … plus a legacy ``code_generation_lite.py`` script
+        that ``datasets>=4`` refuses to run. We read the JSONL files directly.
+        """
+        from fugu.datasets.hf_load import load_hub_jsonl_rows
 
         logger.info(
-            "Loading LiveCodeBench %s release=%s …",
+            "Loading LiveCodeBench %s release=%s (script-free JSONL) …",
             self._hf_path,
             self._release_version,
         )
-        kwargs: dict[str, Any] = {}
-        if self._release_version:
-            # HF configs named like release_v1, release_v5
-            try:
-                ds = load_dataset(
-                    self._hf_path, self._release_version, split="test"
-                )
-            except Exception:
-                ds = load_dataset(self._hf_path, split="test")
-        else:
-            # try common configs
-            try:
-                ds = load_dataset(self._hf_path, split="test")
-            except Exception:
-                ds = load_dataset(self._hf_path, "release_v5", split="test")
-        return [dict(row) for row in ds]
+        # Map optional release tags to cumulative JSONL files when known.
+        # Unknown / None → all top-level *.jsonl (deduped by question_id).
+        release_files = _RELEASE_TO_JSONL.get(
+            (self._release_version or "").strip().lower()
+        )
+        rows = load_hub_jsonl_rows(
+            self._hf_path,
+            filenames=release_files,
+            dedupe_key="question_id",
+        )
+        return rows
 
     def _apply_split(self, tasks: list[CodingTask]) -> list[CodingTask]:
         if self._split == "all" or not tasks:
