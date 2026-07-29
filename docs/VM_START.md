@@ -92,7 +92,20 @@ export FUGU_WORKER__ORNITH_URL=http://HOST:PORT/v1
 curl -s "$FUGU_WORKER__QWEN_URL/models" | head
 ```
 
-Optional: put exports in `env_vm.sh` and `source env_vm.sh` each session (exports die when the terminal exits). Use `screen`/`tmux` for long collect.
+Optional: copy `env_vm.sh.example` → **`env_vm.sh`** (gitignored), fill placeholders,
+and `source env_vm.sh` **only inside your screen** so tokens stay in that session:
+
+```bash
+cp env_vm.sh.example env_vm.sh
+# edit HF_TOKEN=hf_... and worker URLs in env_vm.sh (not committed)
+screen -S fugu
+source .venv/bin/activate
+source env_vm.sh
+# export HF_TOKEN=...   # or set inside env_vm.sh
+```
+
+`HF_TOKEN` / `FUGU_HF_TOKEN` → authenticated Hub downloads (higher rate limits).  
+Exports die when that shell/screen ends.
 
 ---
 

@@ -28,19 +28,26 @@ Tip commit for LCB: **`6465c4f`** or later on `main`.
 Exports die when the terminal exits. Re-export or:
 
 ```bash
-# env_vm.sh (do not commit secrets)
-export FUGU_WORKER__QWEN_URL=http://HOST:PORT/v1
-export FUGU_WORKER__GEMMA_URL=http://HOST:PORT/v1
-export FUGU_WORKER__ORNITH_URL=http://HOST:PORT/v1
-export FUGU_ENV__ISOLATION_MODE=docker
-export FUGU_ENV__ALLOW_HOST_EXECUTION=false
-export FUGU_ENV__DOCKER_IMAGE=fugu-py311-pytest
+# Prefer: copy example (gitignored private file)
+cp env_vm.sh.example env_vm.sh
+# edit env_vm.sh — set HF_TOKEN and worker URLs; never commit env_vm.sh
+
+# env_vm.sh.example includes placeholders:
+#   export HF_TOKEN=hf_YOUR_TOKEN_PLACEHOLDER
+#   export FUGU_WORKER__QWEN_URL=http://HOST:PORT/v1
+#   export FUGU_ENV__ISOLATION_MODE=docker
+#   export FUGU_ENV__DOCKER_IMAGE=fugu-py311-pytest
 ```
 
 ```bash
+screen -S fugu          # keep secrets only in this session
 source .venv/bin/activate
-source env_vm.sh
+source env_vm.sh        # HF_TOKEN + workers + docker; dies when screen ends
 ```
+
+Hub auth: set **`HF_TOKEN`** or **`FUGU_HF_TOKEN`** (read token from
+https://huggingface.co/settings/tokens). Fugu passes it into Hub downloads;
+the token value is never logged.
 
 URLs must end in **`/v1`** only.
 

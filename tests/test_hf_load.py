@@ -8,7 +8,28 @@ from unittest.mock import patch
 
 import pytest
 
-from fugu.datasets.hf_load import load_hub_jsonl_rows
+from fugu.datasets.hf_load import load_hub_jsonl_rows, resolve_hf_token
+
+
+def test_resolve_hf_token_from_env(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.delenv("FUGU_HF_TOKEN", raising=False)
+    assert resolve_hf_token() is None
+    monkeypatch.setenv("FUGU_HF_TOKEN", "hf_test_secret_token")
+    tok = resolve_hf_token()
+    assert tok == "hf_test_secret_token"
+    # normalized for hub/datasets
+    import os
+
+    assert os.environ.get("HF_TOKEN") == "hf_test_secret_token"
+
+
+def test_resolve_hf_token_ignores_placeholder(monkeypatch):
+    monkeypatch.delenv("FUGU_HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "hf_YOUR_TOKEN_PLACEHOLDER")
+    assert resolve_hf_token() is None
 
 
 def test_load_hub_jsonl_rows_local_mock(tmp_path: Path, monkeypatch):
@@ -25,10 +46,10 @@ def test_load_hub_jsonl_rows_local_mock(tmp_path: Path, monkeypatch):
     f1.write_text("\n".join(json.dumps(r) for r in rows1) + "\n", encoding="utf-8")
     f2.write_text("\n".join(json.dumps(r) for r in rows2) + "\n", encoding="utf-8")
 
-    def fake_list(repo_id, repo_type="dataset"):
+    def fake_list(repo_id, repo_type="dataset", **kwargs):
         return ["test.jsonl", "test2.jsonl", "code_generation_lite.py", "README.md"]
 
-    def fake_dl(repo_id, filename, repo_type="dataset"):
+    def fake_dl(repo_id, filename, repo_type="dataset", **kwargs):
         return str(tmp_path / filename)
 
     with patch("huggingface_hub.list_repo_files", side_effect=fake_list), patch(
@@ -47,7 +68,7 @@ def test_load_hub_jsonl_explicit_files(tmp_path: Path):
         encoding="utf-8",
     )
 
-    def fake_dl(repo_id, filename, repo_type="dataset"):
+    def fake_dl(repo_id, filename, repo_type="dataset", **kwargs):
         assert filename == "only.jsonl"
         return str(f1)
 

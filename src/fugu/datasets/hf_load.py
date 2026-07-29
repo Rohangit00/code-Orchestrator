@@ -9,10 +9,50 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
+import os
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_hf_token() -> str | None:
+    """Return a Hub token from the environment (never logged).
+
+    Checked in order:
+
+    1. ``HF_TOKEN`` (Hugging Face standard)
+    2. ``HUGGING_FACE_HUB_TOKEN`` (legacy alias)
+    3. ``FUGU_HF_TOKEN`` (Fugu-specific alias)
+
+    Set only in your private shell/screen, e.g.::
+
+        export HF_TOKEN=hf_xxxxxxxx
+        # or: export FUGU_HF_TOKEN=hf_xxxxxxxx
+
+    Do not commit real tokens. See ``env_vm.sh.example``.
+    """
+    for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "FUGU_HF_TOKEN"):
+        val = os.environ.get(key)
+        if val and val.strip() and "your_token" not in val.lower() and "placeholder" not in val.lower():
+            token = val.strip()
+            # Normalize so huggingface_hub / datasets both see it
+            os.environ.setdefault("HF_TOKEN", token)
+            os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
+            return token
+    return None
+
+
+def _hub_kwargs() -> dict[str, Any]:
+    """Keyword args for hub APIs that accept ``token=``."""
+    token = resolve_hf_token()
+    if token:
+        logger.info("Hugging Face Hub: using authenticated token from env")
+        return {"token": token}
+    logger.warning(
+        "Hugging Face Hub: unauthenticated requests "
+        "(set HF_TOKEN or FUGU_HF_TOKEN in this shell for higher rate limits)"
+    )
+    return {}
 
 
 def load_hub_jsonl_rows(
@@ -36,8 +76,10 @@ def load_hub_jsonl_rows(
     """
     from huggingface_hub import hf_hub_download, list_repo_files
 
+    hub = _hub_kwargs()
+
     if filenames is None:
-        all_files = list_repo_files(repo_id, repo_type="dataset")
+        all_files = list_repo_files(repo_id, repo_type="dataset", **hub)
         # Top-level data files only (ignore nested paths and the .py script).
         filenames = sorted(
             f
@@ -59,7 +101,7 @@ def load_hub_jsonl_rows(
     seen: set[str] = set()
     for fn in filenames:
         logger.info("Downloading %s from %s …", fn, repo_id)
-        path = hf_hub_download(repo_id, fn, repo_type="dataset")
+        path = hf_hub_download(repo_id, fn, repo_type="dataset", **hub)
         with open(path, encoding="utf-8") as fh:
             for line_no, line in enumerate(fh, 1):
                 line = line.strip()
@@ -95,13 +137,20 @@ def load_dataset_script_free(
 
     1. Try normal ``load_dataset`` (works for parquet-only repos like SWE-bench).
     2. On "dataset scripts are no longer supported", fall back to JSONL Hub files.
+
+    Uses ``HF_TOKEN`` / ``FUGU_HF_TOKEN`` when set (see :func:`resolve_hf_token`).
     """
     from datasets import load_dataset
 
+    token = resolve_hf_token()
+    load_kw: dict[str, Any] = {}
+    if token:
+        load_kw["token"] = token
+
     try:
         if name:
-            return load_dataset(path, name, split=split)
-        return load_dataset(path, split=split)
+            return load_dataset(path, name, split=split, **load_kw)
+        return load_dataset(path, split=split, **load_kw)
     except RuntimeError as exc:
         msg = str(exc).lower()
         if "dataset scripts are no longer supported" not in msg and "scripts" not in msg:

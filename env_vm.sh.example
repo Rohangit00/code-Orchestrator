@@ -1,0 +1,29 @@
+# Copy to a private name and source only inside your screen/tmux session.
+#   cp env_vm.sh.example env_vm.sh
+#   # edit env_vm.sh with real values (never commit env_vm.sh)
+#   screen -S fugu
+#   source .venv/bin/activate
+#   source env_vm.sh
+#
+# env_vm.sh is gitignored. Tokens in this shell die when the session ends.
+
+# --- Hugging Face (higher rate limits for dataset download) ---
+# Create a token at https://huggingface.co/settings/tokens (read access is enough)
+export HF_TOKEN=hf_YOUR_TOKEN_PLACEHOLDER
+# Optional alias used by Fugu if HF_TOKEN is unset:
+# export FUGU_HF_TOKEN=hf_YOUR_TOKEN_PLACEHOLDER
+
+# Optional: put HF cache on a large disk
+# export HF_HOME=/path/to/big/disk/hf_cache
+# export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+
+# --- Workers (OpenAI-compatible /v1 roots) ---
+export FUGU_WORKER__QWEN_URL=http://HOST:PORT/v1
+export FUGU_WORKER__GEMMA_URL=http://HOST:PORT/v1
+export FUGU_WORKER__ORNITH_URL=http://HOST:PORT/v1
+
+# --- Isolation / Docker (LiveCodeBench) ---
+export FUGU_ENV__ISOLATION_MODE=docker
+export FUGU_ENV__ALLOW_HOST_EXECUTION=false
+export FUGU_ENV__DOCKER_IMAGE=fugu-py311-pytest
+# export FUGU_ENV__DOCKER_USER="$(id -u):$(id -g)"  # only if mount perms fail
