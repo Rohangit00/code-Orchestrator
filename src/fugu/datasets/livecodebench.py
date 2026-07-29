@@ -54,63 +54,156 @@ _RELEASE_TO_JSONL: dict[str, list[str] | None] = {
     "v6": None,
 }
 
-_PYTEST_HARNESS = '''\
+# Dual-mode public-test harness written into each LCB workspace.
+# 1) stdin  — run solution.py, compare stdout (Codeforces/AtCoder-style)
+# 2) functional — call Solution.method(*args) or module function (LeetCode-style)
+_PYTEST_HARNESS = r'''
 """Auto-generated public-test harness for LiveCodeBench-style tasks."""
 from __future__ import annotations
 
+import ast
+import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-CASES_PATH = Path(__file__).resolve().parent / "public_tests.json"
+ROOT = Path(__file__).resolve().parent
+CASES_PATH = ROOT / "public_tests.json"
+META_PATH = ROOT / "meta.json"
 
 
 def _load_cases():
     raw = CASES_PATH.read_text(encoding="utf-8")
     data = json.loads(raw)
     if isinstance(data, dict) and "inputs" in data:
-        # occasional alternate schema
         inputs = data.get("inputs") or []
         outputs = data.get("outputs") or []
-        return [
-            {"input": i, "output": o}
-            for i, o in zip(inputs, outputs)
-        ]
+        return [{"input": i, "output": o} for i, o in zip(inputs, outputs)]
     if not isinstance(data, list):
         return []
     return data
 
 
-def _run_stdin(inp: str, timeout: float = 5.0) -> tuple[str, int]:
+def _load_meta():
+    if not META_PATH.exists():
+        return {}
+    try:
+        return json.loads(META_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _parse_value(s: str):
+    s = (s or "").strip()
+    if s == "":
+        return ""
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(s)
+    except Exception:
+        return s
+
+
+def _parse_functional_args(inp: str) -> list:
+    """LCB functional inputs: one JSON/Python literal per line = one argument."""
+    text = (inp or "").strip()
+    if not text:
+        return []
+    lines = [ln for ln in text.splitlines() if ln.strip() != ""]
+    if not lines:
+        return [_parse_value(text)]
+    return [_parse_value(ln) for ln in lines]
+
+
+def _run_stdin(inp: str, timeout: float = 5.0) -> tuple[str, int, str]:
+    data = inp if (inp.endswith("\n") or inp == "") else inp + "\n"
     proc = subprocess.run(
         [sys.executable, "solution.py"],
-        input=inp if inp.endswith("\\n") or inp == "" else inp + "\\n",
+        input=data,
         capture_output=True,
         text=True,
         timeout=timeout,
-        cwd=str(Path(__file__).resolve().parent),
+        cwd=str(ROOT),
     )
-    return (proc.stdout or "").strip(), proc.returncode
+    return (proc.stdout or "").strip(), proc.returncode, (proc.stderr or "")
+
+
+def _load_solution_module():
+    path = ROOT / "solution.py"
+    spec = importlib.util.spec_from_file_location("solution", path)
+    assert spec and spec.loader, "cannot load solution.py"
+    mod = importlib.util.module_from_spec(spec)
+    # Ensure fresh load each case (worker overwrites file between runs)
+    sys.modules.pop("solution", None)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _call_functional(func_name: str, args: list):
+    mod = _load_solution_module()
+    if hasattr(mod, "Solution"):
+        inst = mod.Solution()
+        if not hasattr(inst, func_name):
+            raise AssertionError(
+                f"Solution has no method {func_name!r}; "
+                f"attrs={[a for a in dir(inst) if not a.startswith('_')]}"
+            )
+        fn = getattr(inst, func_name)
+        return fn(*args)
+    if hasattr(mod, func_name):
+        return getattr(mod, func_name)(*args)
+    # single public function fallback
+    publics = [
+        n
+        for n, v in vars(mod).items()
+        if callable(v) and not n.startswith("_") and n[0].islower()
+    ]
+    if len(publics) == 1:
+        return getattr(mod, publics[0])(*args)
+    raise AssertionError(
+        f"no Solution.{func_name} or function {func_name!r} in solution.py"
+    )
 
 
 def test_public_cases():
     cases = _load_cases()
     assert cases, "no public test cases"
+    meta = _load_meta()
+    default_func = meta.get("func_name") or meta.get("function_name") or ""
+
     for i, case in enumerate(cases):
         if isinstance(case, str):
-            # skip undecodable blobs
             continue
         inp = case.get("input", case.get("stdin", ""))
-        expected = str(case.get("output", case.get("stdout", ""))).strip()
-        # functional leetcode-style skipped if no stdin
-        testtype = str(case.get("testtype", case.get("type", "stdin"))).lower()
-        if testtype in {"functional", "function"} and not inp:
-            # Best-effort: import solution only
-            import solution  # noqa: F401
+        expected_raw = case.get("output", case.get("stdout", ""))
+        testtype = str(
+            case.get("testtype", case.get("type", "stdin"))
+        ).lower()
+
+        if testtype in {"functional", "function", "leetcode"}:
+            func_name = (
+                case.get("func_name")
+                or case.get("method_name")
+                or default_func
+            )
+            assert func_name, f"case {i}: functional test missing func_name"
+            args = _parse_functional_args(str(inp))
+            expected = _parse_value(str(expected_raw))
+            got = _call_functional(str(func_name), args)
+            assert got == expected, (
+                f"case {i} functional: got {got!r} expected {expected!r} "
+                f"args={args!r}"
+            )
             continue
-        out, rc = _run_stdin(str(inp))
-        assert rc == 0, f"case {i} crashed rc={rc}"
+
+        # stdin / default contest style
+        out, rc, err = _run_stdin(str(inp))
+        assert rc == 0, f"case {i} crashed rc={rc} stderr={err[:500]!r}"
+        expected = str(expected_raw).strip()
         assert out == expected, f"case {i}: got {out!r} expected {expected!r}"
 '''
 
@@ -300,9 +393,40 @@ class LiveCodeBenchDataset(BaseDataset):
         # Drop binary/encrypted private blobs from workspace
         public_json = json.dumps(public_cases, ensure_ascii=False)
 
+        # LeetCode-style metadata often holds func_name as a JSON string field.
+        raw_meta = _parse_json_field(row.get("metadata") or {})
+        if not isinstance(raw_meta, dict):
+            raw_meta = {}
+        func_name = (
+            raw_meta.get("func_name")
+            or raw_meta.get("function_name")
+            or raw_meta.get("method_name")
+            or ""
+        )
+        # Infer method from starter: "def foo(self," inside class Solution
+        if not func_name and "def " in starter:
+            import re as _re
+
+            m = _re.search(
+                r"class\s+Solution\s*:[^\n]*\n(?:.*\n)*?\s+def\s+(\w+)\s*\(",
+                starter,
+            )
+            if m:
+                func_name = m.group(1)
+
+        # Ensure typing imports for common LeetCode starters
+        if "List[" in starter and "from typing" not in starter:
+            starter = "from typing import List\n\n" + starter
+
+        meta_json = json.dumps(
+            {"func_name": func_name, "platform": platform},
+            ensure_ascii=False,
+        )
+
         workspace_files = {
             "solution.py": starter,
             "public_tests.json": public_json,
+            "meta.json": meta_json,
             "test_solution.py": _PYTEST_HARNESS,
         }
 
@@ -316,7 +440,7 @@ class LiveCodeBenchDataset(BaseDataset):
             problem_statement=statement,
             repo_url=None,
             starter_code=starter,
-            entry_point=None,
+            entry_point=func_name or None,
             test_command="python -m pytest test_solution.py -q --tb=line",
             gold_patch=None,
             metadata={
@@ -326,6 +450,7 @@ class LiveCodeBenchDataset(BaseDataset):
                 "contest_date": contest_date,
                 "difficulty": difficulty,
                 "source": "livecodebench",
+                "func_name": func_name,
                 "raw_question_id": task_id,
             },
         )
