@@ -79,8 +79,8 @@ Datasets for collect/eval:
 
 | Doc | Purpose |
 |-----|---------|
-| [docs/VM_START.md](docs/VM_START.md) | **Start here on the VM** — install, torch/venv, pytest, optional CUDA/vLLM |
-| [docs/VM_RUNBOOK.md](docs/VM_RUNBOOK.md) | H200 VM staged smoke (install → pytest → CUDA → vLLM → mock E2E) |
+| [docs/VM_START.md](docs/VM_START.md) | **Start here on the VM** — LCB path, pytest image, collect `-n 1`, train |
+| [docs/VM_RUNBOOK.md](docs/VM_RUNBOOK.md) | Full H200 checklist (LCB primary; SWE optional) |
 | `explanation.md` | Design / MDP motivation |
 | `implementation_plan.md` | Full architecture plan |
 | `implementation_issues.md` | Issue tracker + fix status |
