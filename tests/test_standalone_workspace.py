@@ -28,6 +28,31 @@ def test_extract_python_from_fence():
     assert "def foo" in extract_python_code(raw)
 
 
+def test_extract_python_rejects_pure_diff_or_rebuilds():
+    diff = (
+        "```diff\n"
+        "--- a/solution.py\n"
+        "+++ b/solution.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " import sys\n"
+        "-print(0)\n"
+        "+print(1)\n"
+        "```\n"
+    )
+    code = extract_python_code(diff)
+    # Must not keep @@ markers
+    assert "@@" not in code
+    assert "print(1)" in code or code == ""
+
+
+def test_apply_refuses_raw_diff_markers(tmp_path: Path):
+    ws = StandaloneWorkspace(tmp_path / "ws")
+    ws.create("t", {"solution.py": "x=0\n"})
+    bad = "@@ -1,5 +1,5 @@\n-old\n+new\n"
+    assert not ws.apply_worker_output(bad)
+    assert "x=0" in (ws.current_path / "solution.py").read_text()
+
+
 def test_looks_like_git_diff():
     assert looks_like_git_diff("diff --git a/x b/x\n--- a/x\n+++ b/x\n")
     assert not looks_like_git_diff("def foo():\n    return 1\n")

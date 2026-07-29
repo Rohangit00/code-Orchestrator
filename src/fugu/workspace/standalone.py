@@ -28,38 +28,78 @@ def looks_like_git_diff(text: str) -> bool:
 
 
 def extract_python_code(raw_output: str) -> str:
-    """Extract Python source from model output (fenced or whole text)."""
+    """Extract Python source from model output (fenced or whole text).
+
+    Never returns a raw unified diff: if the model only emitted a patch,
+    try to rebuild file content from ``+`` lines; otherwise return empty.
+    """
     if not raw_output:
         return ""
 
-    # Prefer ```python ... ``` then bare ```
+    # Prefer ```python ... ``` (never prefer ```diff for this path)
     for pattern in (
         r"```(?:python|py)\s*\n(.*?)```",
         r"```\s*\n(.*?)```",
     ):
         m = re.search(pattern, raw_output, re.DOTALL | re.IGNORECASE)
         if m:
-            return m.group(1).strip()
+            body = m.group(1).strip()
+            # Skip pure diff fences
+            if looks_like_git_diff(body) and "def " not in body and "class " not in body:
+                reconstructed = _python_from_unified_diff(body)
+                return reconstructed
+            if not looks_like_git_diff(body):
+                return body
+            # Mixed: prefer reconstructed or body without @@ headers
+            reconstructed = _python_from_unified_diff(body)
+            return reconstructed or body
 
-    # Strip leading prose if the rest looks like code
     text = raw_output.strip()
+    if looks_like_git_diff(text):
+        return _python_from_unified_diff(text)
+
     if "def " in text or "class " in text or "import " in text:
-        # Drop lines before first code-like line
         lines = text.splitlines()
         start = 0
         for i, line in enumerate(lines):
             s = line.strip()
             if s.startswith(
                 ("def ", "class ", "import ", "from ", "#", "#!/")
-            ) or (s and not s[0].isalpha() and s[0] in ("@",)):
-                start = i
-                break
-            if s.startswith("def ") or s.startswith("class "):
+            ):
                 start = i
                 break
         return "\n".join(lines[start:]).strip()
 
     return text
+
+
+def _python_from_unified_diff(diff_text: str) -> str:
+    """Best-effort: rebuild a file from added lines in a unified diff."""
+    out: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("+++") or line.startswith("---") or line.startswith("diff "):
+            continue
+        if line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            out.append(line[1:])
+        elif line.startswith("-"):
+            continue
+        elif line.startswith("\\"):
+            continue
+        else:
+            # context line (space-prefixed or plain)
+            if line.startswith(" "):
+                out.append(line[1:])
+            else:
+                out.append(line)
+    code = "\n".join(out).strip()
+    if not code or looks_like_git_diff(code):
+        return ""
+    # Must look vaguely like Python
+    if not any(k in code for k in ("def ", "class ", "import ", "print", "=")):
+        return ""
+    return code
 
 
 class StandaloneWorkspace:
@@ -115,14 +155,22 @@ class StandaloneWorkspace:
             return False
 
     def apply_worker_output(self, raw: str) -> bool:
-        """Apply worker output as Python solution code."""
+        """Apply worker output as Python solution code (never raw diffs)."""
         code = extract_python_code(raw)
         if not code.strip():
+            logger.warning(
+                "Standalone workspace: no Python source extracted from worker "
+                "output (refuse writing git-diff junk to solution.py)"
+            )
             return False
-        if looks_like_git_diff(code) and "def " not in code and "class " not in code:
+        if looks_like_git_diff(code):
             logger.warning(
                 "Standalone workspace expected Python code, got diff-like text"
             )
+            return False
+        # Reject if still full of unified-diff markers
+        if "\n@@ " in code or code.lstrip().startswith("@@"):
+            logger.warning("Standalone workspace: refused @@ diff markers in code")
             return False
         return self.write_solution(code)
 

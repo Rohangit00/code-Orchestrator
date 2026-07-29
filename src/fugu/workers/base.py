@@ -70,8 +70,10 @@ class BaseWorker(ABC):
         repository_context: str,
         history: list[dict],
         test_results: dict | None = None,
+        *,
+        code_format: str = "diff",
     ) -> WorkerResponse:
-        """Generate a code patch for the given coding task.
+        """Generate a code fix for the given coding task.
 
         Args:
             prompt: The coding task / issue description.
@@ -82,20 +84,31 @@ class BaseWorker(ABC):
                 ``patch``.
             test_results: Current test pass/fail state as a dict with keys
                 ``passed``, ``failed``, ``errors``, ``output``.
+            code_format: ``"diff"`` for SWE-bench (unified git patch) or
+                ``"python"`` for LiveCodeBench-style full-file solutions.
 
         Returns:
-            A :class:`WorkerResponse` with the generated patch and metadata.
+            A :class:`WorkerResponse` with the generated patch/code and metadata.
         """
         ...
 
     # -- Prompt helpers -----------------------------------------------------
 
-    def _build_system_prompt(self) -> str:
-        """Build the system prompt instructing the model to emit a git diff.
-
-        The prompt is intentionally terse: vLLM coding models already know
-        how to produce diffs; we just need to frame the expectations.
-        """
+    def _build_system_prompt(self, code_format: str = "diff") -> str:
+        """System prompt for either git-diff or full-Python output."""
+        fmt = (code_format or "diff").lower().strip()
+        if fmt == "python":
+            return (
+                "You are an expert competitive programmer.  Solve the problem "
+                "by writing a complete Python program.\n\n"
+                "IMPORTANT:\n"
+                "- Output the FULL contents of solution.py (runnable Python).\n"
+                "- Wrap the code in a ```python code fence.\n"
+                "- Do NOT output a git diff, unified patch, or ```diff block.\n"
+                "- Do NOT use lines like @@ or --- a/ or +++ b/.\n"
+                "- Include only the Python source (imports + solution).\n"
+                "- Read stdin / write stdout if the problem requires it.\n"
+            )
         return (
             "You are an expert software engineer.  Your task is to fix the "
             "described issue by generating a code patch.\n\n"
@@ -157,20 +170,16 @@ class BaseWorker(ABC):
     # -- Patch extraction ---------------------------------------------------
 
     @staticmethod
-    def _extract_patch(raw_output: str) -> str:
-        """Extract a git diff **or** Python code from raw model output.
-
-        Extraction strategy (first match wins):
-
-        1. Fenced ``diff`` / ``python`` / bare code blocks.
-        2. Unified diff headers (``diff --git``, ``--- a/``, …).
-        3. Fallback — entire output stripped (usable as Python for LCB).
-
-        Returns:
-            Extracted text (may be empty if the model produced nothing).
-        """
+    def _extract_patch(raw_output: str, code_format: str = "diff") -> str:
+        """Extract git diff or Python source depending on *code_format*."""
         if not raw_output:
             return ""
+
+        fmt = (code_format or "diff").lower().strip()
+        if fmt == "python":
+            from fugu.workspace.standalone import extract_python_code
+
+            return extract_python_code(raw_output)
 
         # Prefer explicit language fences
         for lang in ("diff", "python", "py", ""):

@@ -64,6 +64,8 @@ class MockWorker(BaseWorker):
         repository_context: str,
         history: list[dict],
         test_results: dict | None = None,
+        *,
+        code_format: str = "diff",
     ) -> WorkerResponse:
         """Return a mock response, optionally simulating latency and failure.
 
@@ -147,6 +149,8 @@ class RecordedMockWorker(BaseWorker):
         repository_context: str,
         history: list[dict],
         test_results: dict | None = None,
+        *,
+        code_format: str = "diff",
     ) -> WorkerResponse:
         """Return the next recorded response.
 

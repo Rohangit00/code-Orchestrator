@@ -104,8 +104,10 @@ class VLLMWorker(BaseWorker):
         repository_context: str,
         history: list[dict],
         test_results: dict | None = None,
+        *,
+        code_format: str = "diff",
     ) -> WorkerResponse:
-        """Call the vLLM chat completions endpoint and return a patch.
+        """Call the vLLM chat completions endpoint and return a patch/code.
 
         On any network, HTTP, or parsing error the method returns a
         :class:`WorkerResponse` with ``success=False`` and a descriptive
@@ -128,10 +130,16 @@ class VLLMWorker(BaseWorker):
                     error=f"Model detection failed: {exc}",
                 )
 
-        system_msg = self._build_system_prompt()
+        system_msg = self._build_system_prompt(code_format=code_format)
         user_msg = self._build_user_prompt(
             prompt, repository_context, history, test_results
         )
+        if (code_format or "").lower() == "python":
+            user_msg += (
+                "\n\n## Output format\n"
+                "Return the complete Python source for solution.py in a "
+                "```python fence. Do not return a git diff."
+            )
 
         client = await self._get_client()
         url = f"{self.base_url}/chat/completions"
@@ -212,7 +220,7 @@ class VLLMWorker(BaseWorker):
             )
 
         usage: dict[str, int] = data.get("usage", {})
-        patch = self._extract_patch(raw)
+        patch = self._extract_patch(raw, code_format=code_format)
 
         logger.info(
             "Worker %s completed in %.0f ms (%d tokens)",

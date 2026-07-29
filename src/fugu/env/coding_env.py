@@ -282,6 +282,7 @@ class CodingEnvironment:
                 repository_context=self._state.repo_context,
                 history=history_dicts,
                 test_results=test_dict,
+                code_format=self._worker_code_format(),
             )
 
             tokens_used = response.tokens_used
@@ -357,6 +358,7 @@ class CodingEnvironment:
                     repository_context=self._state.repo_context,
                     history=history_dicts,
                     test_results=test_dict,
+                    code_format=self._worker_code_format(),
                 )
 
                 tokens_used = response.tokens_used
@@ -559,11 +561,23 @@ class CodingEnvironment:
             cmd = self._task.test_command
         return self._runner.run_tests(work, test_command=cmd, repo_url=repo_url)
 
+    def _worker_code_format(self) -> str:
+        """Standalone LCB tasks need full Python; SWE needs git diffs."""
+        return "python" if self._mode == "standalone" else "diff"
+
     def _apply_worker_content(self, content: str) -> tuple[bool, str]:
         """Apply git patch (repo) or write Python solution (standalone)."""
         if self._mode == "standalone":
             ok = self._standalone.apply_worker_output(content)
-            return ok, "" if ok else "Failed to write Python solution"
+            return (
+                ok,
+                ""
+                if ok
+                else (
+                    "Failed to write Python solution (worker must output full "
+                    "```python code, not a git diff)"
+                ),
+            )
         if not self._repo.current_path:
             return False, "No repo path"
         ok = self._repo.apply_patch(content)
