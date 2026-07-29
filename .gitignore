@@ -50,8 +50,9 @@ credentials.json
 # Project runtime / artifacts
 data/
 outputs/
-workspace/
+/workspace/
 **/fugu_workspaces/
+# Keep the package src/fugu/workspace/ tracked (not the runtime dir)
 *.bin
 !tests/**/*.bin
 

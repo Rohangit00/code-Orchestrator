@@ -9,8 +9,7 @@ Usage::
     fugu-eval -a outputs/planner/final_adapter -d swebench-lite
     fugu-eval -a outputs/planner/final_adapter -d swebench-verified -n 50 -o results.json
 
-Only SWE-bench variants are supported for evaluation until a standalone
-Python workspace exists for HumanEval / MBPP.
+Primary dataset: LiveCodeBench (Python). SWE-bench variants remain available.
 """
 
 from __future__ import annotations
@@ -36,8 +35,27 @@ from rich.table import Table
 
 console = Console()
 
-# SWE-bench only until standalone HumanEval/MBPP workspace support exists.
 _DATASET_MAP: dict[str, tuple[str, str, dict]] = {
+    "livecodebench": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "all", "python_only": True},
+    ),
+    "livecodebench-train": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "train", "python_only": True},
+    ),
+    "livecodebench-val": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "val", "python_only": True},
+    ),
+    "livecodebench-test": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "test", "python_only": True},
+    ),
     "swebench-lite": (
         "fugu.datasets.swebench",
         "SWEBenchDataset",
@@ -124,8 +142,8 @@ async def _evaluate_task(env, planner, task) -> dict:
     "--dataset",
     "-d",
     type=click.Choice(_SUPPORTED_DATASETS, case_sensitive=False),
-    default="swebench-lite",
-    help="Benchmark dataset to evaluate on (SWE-bench variants only).",
+    default="livecodebench-test",
+    help="Dataset: livecodebench[-train|-val|-test] or swebench-*.",
 )
 @click.option(
     "--max-tasks",

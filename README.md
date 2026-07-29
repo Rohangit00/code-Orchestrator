@@ -9,7 +9,8 @@ Small **planner** model that learns to coordinate larger coding **workers**
 |------|--------|
 | Unit tests / local logic | Yes |
 | Controlled **smoke transfer** to an H200 VM | Yes, after clone + install |
-| **Real** third-party SWE-bench collection | **Partial** — Fugu docker sandbox exists (`isolation_mode=docker`); not the official SWE-bench harness; smoke `-n 1` first |
+| LiveCodeBench Python collect/train | **Yes** — standalone workspace + one pytest image |
+| **Real** third-party SWE-bench collection | **Partial** — docker sandbox exists; not official harness; multi-repo images hard |
 | Full train/eval on H200s | Only after smoke stages pass (see [docs/VM_RUNBOOK.md](docs/VM_RUNBOOK.md)) |
 
 Source of truth for open work: `task.md`, `implementation_issues.md`.
@@ -67,8 +68,12 @@ fugu-train --help
 fugu-eval --help
 ```
 
-Datasets for collect/eval: **SWE-bench only** (`swebench-lite`, `swebench-full`,
-`swebench-verified`). HumanEval/MBPP adapters are inspection-only.
+Datasets for collect/eval:
+
+- **Primary:** LiveCodeBench Python — `livecodebench-train` / `-val` / `-test` / `livecodebench`
+  (standalone workspace; **one** Docker image with pytest is enough)
+- **Optional:** SWE-bench (`swebench-lite`, `swebench-full`, `swebench-verified`) for
+  repo-backed experiments (harder envs)
 
 ## Docs
 

@@ -5,14 +5,11 @@ each record into a :class:`~fugu.datasets.base.CodingTask`.
 HumanEval tasks are standalone function-generation problems — no
 repository cloning is required.
 
-.. warning::
+Standalone workspace support exists for LiveCodeBench-style tasks. HumanEval
+can be wired similarly via ``workspace_files`` metadata; prefer
+``fugu-collect -d livecodebench-train`` for the primary path.
 
-   Collection and evaluation through :class:`~fugu.env.coding_env.CodingEnvironment`
-   are **not supported yet**. The env requires a ``repo_url`` and git-style
-   patches. Use SWE-bench (``fugu-collect -d swebench-lite``, etc.) until a
-   standalone Python workspace harness exists.
-
-Usage (inspection only)::
+Usage::
 
     ds = HumanEvalDataset()
     for task in ds:

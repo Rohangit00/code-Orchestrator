@@ -83,10 +83,17 @@
 
 ## Remaining Work
 
+### LiveCodeBench (primary path — implemented in code)
+- [x] Standalone workspace (no `repo_url`)
+- [x] `LiveCodeBenchDataset` + train/val/test splits
+- [x] CLI `livecodebench[-train|-val|-test]`
+- [ ] VM: collect on LCB with pytest image + train planner
+
 ### Integration (not yet run)
-- [ ] End-to-end: collect trajectories with mock workers on SWE-bench Lite
-- [ ] End-to-end: train planner for 10 steps on mock data
-- [ ] End-to-end: eval planner on mock tasks
+- [ ] End-to-end: collect trajectories with mock/real workers on LiveCodeBench
+- [ ] End-to-end: train planner for 10 steps on LCB buffer
+- [ ] End-to-end: eval planner on livecodebench-test
+
 
 ### Open Issues (deferred, not blockers)
 - [ ] #10 — Full-sequence action probabilities (needed for RL, not SFT)

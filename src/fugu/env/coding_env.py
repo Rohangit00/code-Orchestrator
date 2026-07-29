@@ -1,9 +1,10 @@
 """Gymnasium-style coding environment for the Fugu orchestrator MDP.
 
-The :class:`CodingEnvironment` manages a single episode of code repair:
-it clones a repository, dispatches worker calls, applies patches, runs
-tests, and computes scalar rewards.  The ``step`` coroutine is async
-because worker LLM calls are inherently I/O-bound.
+Supports:
+
+* **Repo tasks** (SWE-bench): clone, git patch, tests.
+* **Standalone tasks** (LiveCodeBench / HumanEval-style): local workspace,
+  write Python solution files, run pytest.
 
 Typical usage::
 
@@ -19,11 +20,10 @@ Typical usage::
 
 from __future__ import annotations
 
-import asyncio
 import copy
-import dataclasses
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fugu.core.actions import PlannerAction
@@ -37,26 +37,28 @@ from fugu.core.state import (
     Transition,
 )
 from fugu.workers.pool import WorkerPool
+from fugu.workspace.standalone import StandaloneWorkspace
 
 if TYPE_CHECKING:
     from fugu.datasets.base import CodingTask
     from fugu.execution.runner import TestRunner
-    from fugu.repo.context import RepoContext
     from fugu.repo.manager import RepoManager
 
 logger = logging.getLogger(__name__)
 
 
 class CodingEnvironment:
-    """Gymnasium-style environment for code-repair episodes.
+    """Gymnasium-style environment for coding episodes.
 
     Parameters:
         worker_pool: Registry of worker LLMs keyed by :class:`PlannerAction`.
-        repo_manager: Handles cloning, patching, and resetting repos.
+        repo_manager: Handles cloning, patching, and resetting git repos.
         test_runner: Executes test suites and compile checks.
         reward_calculator: Optional custom reward calculator; a default is
             created if ``None``.
         max_steps: Maximum number of steps before the episode terminates.
+        standalone_workspace: Optional manager for non-git tasks; created
+            under ``repo_manager.workspace_dir / "standalone"`` if omitted.
     """
 
     def __init__(
@@ -67,6 +69,7 @@ class CodingEnvironment:
         reward_calculator: RewardCalculator | None = None,
         max_steps: int = 10,
         cleanup_on_done: bool = True,
+        standalone_workspace: StandaloneWorkspace | None = None,
     ) -> None:
         self._pool = worker_pool
         self._repo = repo_manager
@@ -74,55 +77,53 @@ class CodingEnvironment:
         self._reward = reward_calculator or RewardCalculator()
         self._max_steps = max_steps
         self._cleanup_on_done = cleanup_on_done
+        self._standalone = standalone_workspace or StandaloneWorkspace(
+            Path(repo_manager.workspace_dir) / "standalone"
+        )
 
         # Episode state — populated by reset()
         self._task: CodingTask | None = None
         self._state: PlannerState | None = None
         self._transitions: list[Transition] = []
         self._done: bool = True
+        self._mode: str = "repo"  # "repo" | "standalone"
 
         # Track last worker action for RETRY
         self._last_worker_action: PlannerAction | None = None
         self._last_worker_error: str = ""
 
     # ------------------------------------------------------------------
+    # Paths
+    # ------------------------------------------------------------------
+
+    def _work_path(self) -> Path | None:
+        if self._mode == "standalone":
+            return self._standalone.current_path
+        return self._repo.current_path
+
+    # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
 
     def reset(self, task: CodingTask) -> PlannerState:
-        """Start a new episode.
-
-        Clones the repository, optionally applies the test patch
-        (SWE-bench style), runs a baseline test suite, and constructs
-        the initial :class:`PlannerState`.
-
-        Args:
-            task: The coding task describing the issue to fix.
-
-        Returns:
-            The initial planner observation state.
-        """
+        """Start a new episode (repo-backed or standalone workspace)."""
         self._task = task
         self._transitions = []
         self._done = False
         self._last_worker_action = None
         self._last_worker_error = ""
 
-        # Repo-backed tasks only (SWE-bench). Standalone datasets such as
-        # HumanEval / MBPP need a separate workspace harness before they
-        # can run through this environment.
+        # Prefer standalone when no git remote (LCB / HumanEval-style).
         if not task.repo_url:
-            raise ValueError(
-                f"Task {task.task_id!r} has no repo_url. CodingEnvironment "
-                "currently supports SWE-bench-style repository tasks only. "
-                "HumanEval / MBPP require a standalone Python workspace "
-                "that is not implemented yet."
-            )
+            return self._reset_standalone(task)
+        return self._reset_repo(task)
 
-        # Clone the repository
-        repo_path = self._repo.clone(task.repo_url, task.base_commit)
+    def _reset_repo(self, task: CodingTask) -> PlannerState:
+        self._mode = "repo"
+        self._standalone.cleanup()
 
-        # Apply test patch if present (SWE-bench datasets provide one)
+        repo_path = self._repo.clone(task.repo_url, task.base_commit)  # type: ignore[arg-type]
+
         if task.test_patch and repo_path:
             applied = self._repo.apply_test_patch(task.test_patch)
             if not applied:
@@ -130,7 +131,6 @@ class CodingEnvironment:
                     "Failed to apply test patch for task %s", task.task_id
                 )
 
-        # Run baseline tests
         baseline_tests: TestResults | None = None
         baseline_compile: CompileStatus | None = None
         if repo_path:
@@ -141,7 +141,6 @@ class CodingEnvironment:
                 repo_url=task.repo_url,
             )
 
-        # Build repo context summary
         repo_context = ""
         if repo_path:
             try:
@@ -159,6 +158,52 @@ class CodingEnvironment:
                 logger.debug("Could not build repo context: %s", exc)
                 repo_context = ""
 
+        return self._finish_reset(task, baseline_tests, baseline_compile, repo_context)
+
+    def _reset_standalone(self, task: CodingTask) -> PlannerState:
+        self._mode = "standalone"
+        try:
+            self._repo.cleanup()
+        except Exception:
+            pass
+
+        files = dict(task.metadata.get("workspace_files") or {})
+        if not files:
+            # Minimal fallback: starter + empty tests
+            starter = task.starter_code or "# Write your solution\n"
+            files = {
+                "solution.py": starter,
+                "test_solution.py": (
+                    "def test_placeholder():\n"
+                    "    # No public tests provided on task\n"
+                    "    assert True\n"
+                ),
+            }
+        solution_name = str(task.metadata.get("solution_file") or "solution.py")
+        path = self._standalone.create(
+            task.task_id, files, solution_name=solution_name
+        )
+
+        baseline_compile = self._runner.compile_check(path)
+        # Standalone tasks are local paths — not untrusted remotes.
+        baseline_tests = self._runner.run_tests(
+            path,
+            test_command=task.test_command or "python -m pytest -q --tb=no",
+            repo_url=str(path),
+        )
+        repo_context = self._standalone.file_tree_summary()
+        if task.starter_code:
+            repo_context += f"\n\n[Starter]\n{task.starter_code[:1500]}"
+
+        return self._finish_reset(task, baseline_tests, baseline_compile, repo_context)
+
+    def _finish_reset(
+        self,
+        task: CodingTask,
+        baseline_tests: TestResults | None,
+        baseline_compile: CompileStatus | None,
+        repo_context: str,
+    ) -> PlannerState:
         self._state = PlannerState(
             task_description=task.problem_statement,
             repo_context=repo_context,
@@ -170,10 +215,10 @@ class CodingEnvironment:
             max_steps=self._max_steps,
             remaining_budget=1.0,
         )
-
         logger.info(
-            "Episode reset for task %s — baseline tests: %s",
+            "Episode reset for task %s mode=%s — baseline tests: %s",
             task.task_id,
+            self._mode,
             baseline_tests.summary() if baseline_tests else "none",
         )
         return copy.deepcopy(self._state)
@@ -241,29 +286,28 @@ class CodingEnvironment:
 
             tokens_used = response.tokens_used
             latency_ms = response.latency_ms
-            patch_applied = response.patch
+            patch_applied = response.patch or response.raw_output
 
-            if response.success and response.patch:
-                # Apply the patch
-                if self._repo.current_path:
-                    applied = self._repo.apply_patch(response.patch)
-                    if applied:
-                        self._state.current_patch = self._repo.get_diff()
-                        # Run tests after applying
-                        compile_status = self._runner.compile_check(
-                            self._repo.current_path
-                        )
-                        tests_after = self._runner.run_tests(
-                            self._repo.current_path,
-                            test_command=self._task.test_command,
-                            repo_url=self._task.repo_url,
-                        )
-                        tests_were_evaluated = True
-                    else:
-                        error_msg = "Patch failed to apply"
-                        logger.warning(
-                            "Patch from %s failed to apply", worker_name
-                        )
+            if response.success and (response.patch or response.raw_output):
+                applied, err = self._apply_worker_content(
+                    response.patch or response.raw_output
+                )
+                if applied:
+                    work = self._work_path()
+                    assert work is not None
+                    self._state.current_patch = (
+                        self._repo.get_diff()
+                        if self._mode == "repo"
+                        else (response.patch or "")[:2000]
+                    )
+                    compile_status = self._runner.compile_check(work)
+                    tests_after = self._run_task_tests(work)
+                    tests_were_evaluated = True
+                else:
+                    error_msg = err or "Worker output failed to apply"
+                    logger.warning(
+                        "Output from %s failed to apply: %s", worker_name, error_msg
+                    )
             else:
                 error_msg = response.error or "Worker generation failed"
                 logger.warning(
@@ -275,43 +319,25 @@ class CodingEnvironment:
             self._last_worker_error = error_msg
 
         elif action is PlannerAction.RUN_TESTS:
-            # ----------------------------------------------------------
-            # Run tests only (no patch, no compile check)
-            # ----------------------------------------------------------
-            if self._repo.current_path:
-                tests_after = self._runner.run_tests(
-                    self._repo.current_path,
-                    test_command=self._task.test_command,
-                    repo_url=self._task.repo_url,
-                )
+            work = self._work_path()
+            if work is not None:
+                tests_after = self._run_task_tests(work)
                 tests_were_evaluated = True
             latency_ms = (time.monotonic() - step_start) * 1000.0
 
         elif action is PlannerAction.VERIFY:
-            # ----------------------------------------------------------
-            # Full verification: compile check + run tests
-            # ----------------------------------------------------------
-            if self._repo.current_path:
-                compile_status = self._runner.compile_check(
-                    self._repo.current_path
-                )
-                tests_after = self._runner.run_tests(
-                    self._repo.current_path,
-                    test_command=self._task.test_command,
-                    repo_url=self._task.repo_url,
-                )
+            work = self._work_path()
+            if work is not None:
+                compile_status = self._runner.compile_check(work)
+                tests_after = self._run_task_tests(work)
                 tests_were_evaluated = True
             latency_ms = (time.monotonic() - step_start) * 1000.0
 
         elif action is PlannerAction.RETRY:
-            # ----------------------------------------------------------
-            # Re-call the last worker with error context
-            # ----------------------------------------------------------
             if self._last_worker_action is not None:
                 worker = self._pool.get_worker(self._last_worker_action)
                 worker_name = worker.name
 
-                # Augment history with error context
                 history_dicts = self._build_worker_history()
                 if self._last_worker_error:
                     history_dicts.append(
@@ -335,43 +361,35 @@ class CodingEnvironment:
 
                 tokens_used = response.tokens_used
                 latency_ms = response.latency_ms
-                patch_applied = response.patch
+                patch_applied = response.patch or response.raw_output
 
-                if response.success and response.patch:
-                    # Reset repo before re-applying
-                    if self._repo.current_path:
-                        self._repo.reset()
-                        # Re-apply test patch if needed
-                        if self._task.test_patch:
-                            self._repo.apply_test_patch(self._task.test_patch)
-
-                        applied = self._repo.apply_patch(response.patch)
-                        if applied:
-                            self._state.current_patch = self._repo.get_diff()
-                            compile_status = self._runner.compile_check(
-                                self._repo.current_path
-                            )
-                            tests_after = self._runner.run_tests(
-                                self._repo.current_path,
-                                test_command=self._task.test_command,
-                                repo_url=self._task.repo_url,
-                            )
-                            tests_were_evaluated = True
-                        else:
-                            error_msg = "Retry patch failed to apply"
+                if response.success and (response.patch or response.raw_output):
+                    self._reset_workspace_for_retry()
+                    applied, err = self._apply_worker_content(
+                        response.patch or response.raw_output
+                    )
+                    if applied:
+                        work = self._work_path()
+                        assert work is not None
+                        self._state.current_patch = (
+                            self._repo.get_diff()
+                            if self._mode == "repo"
+                            else (response.patch or "")[:2000]
+                        )
+                        compile_status = self._runner.compile_check(work)
+                        tests_after = self._run_task_tests(work)
+                        tests_were_evaluated = True
+                    else:
+                        error_msg = err or "Retry output failed to apply"
                 else:
                     error_msg = response.error or "Retry generation failed"
 
                 self._last_worker_error = error_msg
             else:
-                # No previous worker to retry — treat as a no-op
                 logger.warning("RETRY called with no previous worker action")
                 latency_ms = 0.0
 
         elif action is PlannerAction.STOP:
-            # ----------------------------------------------------------
-            # Agent decides to stop
-            # ----------------------------------------------------------
             self._done = True
             latency_ms = 0.0
 
@@ -394,11 +412,13 @@ class CodingEnvironment:
 
         # Changed files
         files_modified: list[str] = []
-        if self._repo.current_path:
+        if self._mode == "repo" and self._repo.current_path:
             try:
                 files_modified = self._repo.get_changed_files()
             except Exception:
                 pass
+        elif self._mode == "standalone" and self._standalone.current_path:
+            files_modified = [self._standalone._solution_name]
 
         # Build history entry
         history_entry = HistoryEntry(
@@ -513,7 +533,7 @@ class CodingEnvironment:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Clean up repository workspace and mark the episode finished.
+        """Clean up workspace and mark the episode finished.
 
         Cleanup is skipped when ``cleanup_on_done`` is ``False`` (debug).
         """
@@ -523,7 +543,41 @@ class CodingEnvironment:
         try:
             self._repo.cleanup()
         except Exception as exc:
-            logger.warning("Error during environment cleanup: %s", exc)
+            logger.warning("Error during repo cleanup: %s", exc)
+        try:
+            self._standalone.cleanup()
+        except Exception as exc:
+            logger.warning("Error during standalone cleanup: %s", exc)
+
+    def _run_task_tests(self, work: Path) -> TestResults:
+        assert self._task is not None
+        if self._mode == "standalone":
+            repo_url = str(work)
+            cmd = self._task.test_command or "python -m pytest -q --tb=no"
+        else:
+            repo_url = self._task.repo_url
+            cmd = self._task.test_command
+        return self._runner.run_tests(work, test_command=cmd, repo_url=repo_url)
+
+    def _apply_worker_content(self, content: str) -> tuple[bool, str]:
+        """Apply git patch (repo) or write Python solution (standalone)."""
+        if self._mode == "standalone":
+            ok = self._standalone.apply_worker_output(content)
+            return ok, "" if ok else "Failed to write Python solution"
+        if not self._repo.current_path:
+            return False, "No repo path"
+        ok = self._repo.apply_patch(content)
+        return ok, "" if ok else "Patch failed to apply"
+
+    def _reset_workspace_for_retry(self) -> None:
+        assert self._task is not None
+        if self._mode == "standalone":
+            self._standalone.reset()
+            return
+        if self._repo.current_path:
+            self._repo.reset()
+            if self._task.test_patch:
+                self._repo.apply_test_patch(self._task.test_patch)
 
     # ------------------------------------------------------------------
     # Properties

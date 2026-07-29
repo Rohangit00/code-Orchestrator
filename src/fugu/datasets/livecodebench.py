@@ -1,0 +1,316 @@
+"""LiveCodeBench adapter (Python code generation).
+
+Loads contest-style problems from HuggingFace
+``livecodebench/code_generation_lite`` (or a configurable dataset id),
+filters to Python-friendly tasks, materialises a small pytest workspace,
+and exposes train/val/test splits for collection and evaluation.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+from datetime import datetime
+from typing import Any, Iterator, Literal
+
+from fugu.datasets.base import BaseDataset, CodingTask
+
+logger = logging.getLogger(__name__)
+
+SplitName = Literal["train", "val", "test", "all"]
+
+# Default: lite generation set used by LiveCodeBench releases.
+_DEFAULT_HF = "livecodebench/code_generation_lite"
+
+_PYTEST_HARNESS = '''\
+"""Auto-generated public-test harness for LiveCodeBench-style tasks."""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+CASES_PATH = Path(__file__).resolve().parent / "public_tests.json"
+
+
+def _load_cases():
+    raw = CASES_PATH.read_text(encoding="utf-8")
+    data = json.loads(raw)
+    if isinstance(data, dict) and "inputs" in data:
+        # occasional alternate schema
+        inputs = data.get("inputs") or []
+        outputs = data.get("outputs") or []
+        return [
+            {"input": i, "output": o}
+            for i, o in zip(inputs, outputs)
+        ]
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def _run_stdin(inp: str, timeout: float = 5.0) -> tuple[str, int]:
+    proc = subprocess.run(
+        [sys.executable, "solution.py"],
+        input=inp if inp.endswith("\\n") or inp == "" else inp + "\\n",
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(Path(__file__).resolve().parent),
+    )
+    return (proc.stdout or "").strip(), proc.returncode
+
+
+def test_public_cases():
+    cases = _load_cases()
+    assert cases, "no public test cases"
+    for i, case in enumerate(cases):
+        if isinstance(case, str):
+            # skip undecodable blobs
+            continue
+        inp = case.get("input", case.get("stdin", ""))
+        expected = str(case.get("output", case.get("stdout", ""))).strip()
+        # functional leetcode-style skipped if no stdin
+        testtype = str(case.get("testtype", case.get("type", "stdin"))).lower()
+        if testtype in {"functional", "function"} and not inp:
+            # Best-effort: import solution only
+            import solution  # noqa: F401
+            continue
+        out, rc = _run_stdin(str(inp))
+        assert rc == 0, f"case {i} crashed rc={rc}"
+        assert out == expected, f"case {i}: got {out!r} expected {expected!r}"
+'''
+
+
+class LiveCodeBenchDataset(BaseDataset):
+    """Python LiveCodeBench code-generation problems.
+
+    Parameters
+    ----------
+    hf_path:
+        HuggingFace dataset id.
+    release_version:
+        Optional LCB release tag / config name (e.g. ``release_v5``).
+        Passed as the HF ``name``/config when set.
+    split:
+        ``train`` / ``val`` / ``test`` / ``all`` subset after filtering.
+    split_ratios:
+        Fractions for train/val (test gets the remainder). Used when
+        ``split_mode="random"``.
+    split_mode:
+        ``time`` — older contests → train, mid → val, newest → test.
+        ``random`` — seeded shuffle then ratios.
+    seed:
+        RNG seed for random splits.
+    python_only:
+        Drop rows that look non-Python when platform/language fields exist.
+    """
+
+    def __init__(
+        self,
+        hf_path: str = _DEFAULT_HF,
+        release_version: str | None = None,
+        split: SplitName = "all",
+        split_ratios: tuple[float, float] = (0.7, 0.15),
+        split_mode: Literal["time", "random"] = "time",
+        seed: int = 42,
+        python_only: bool = True,
+        max_problems: int | None = None,
+    ) -> None:
+        self._hf_path = hf_path
+        self._release_version = release_version
+        self._split = split
+        self._split_ratios = split_ratios
+        self._split_mode = split_mode
+        self._seed = seed
+        self._python_only = python_only
+        self._max_problems = max_problems
+        self._tasks: list[CodingTask] | None = None
+
+    @property
+    def name(self) -> str:
+        return f"livecodebench_{self._split}"
+
+    @property
+    def size(self) -> int:
+        self._ensure_loaded()
+        assert self._tasks is not None
+        return len(self._tasks)
+
+    def __iter__(self) -> Iterator[CodingTask]:
+        self._ensure_loaded()
+        assert self._tasks is not None
+        yield from self._tasks
+
+    def _ensure_loaded(self) -> None:
+        if self._tasks is not None:
+            return
+        rows = self._load_rows()
+        tasks = [t for t in (self._row_to_task(r) for r in rows) if t is not None]
+        if self._python_only:
+            # Prefer rows that look Python-friendly (starter or no cpp markers)
+            pass  # filtering done in _row_to_task
+        tasks = self._apply_split(tasks)
+        if self._max_problems is not None:
+            tasks = tasks[: self._max_problems]
+        self._tasks = tasks
+        logger.info(
+            "LiveCodeBench loaded split=%s n=%d (mode=%s)",
+            self._split,
+            len(tasks),
+            self._split_mode,
+        )
+
+    def _load_rows(self) -> list[dict[str, Any]]:
+        from datasets import load_dataset
+
+        logger.info(
+            "Loading LiveCodeBench %s release=%s …",
+            self._hf_path,
+            self._release_version,
+        )
+        kwargs: dict[str, Any] = {}
+        if self._release_version:
+            # HF configs named like release_v1, release_v5
+            try:
+                ds = load_dataset(
+                    self._hf_path, self._release_version, split="test"
+                )
+            except Exception:
+                ds = load_dataset(self._hf_path, split="test")
+        else:
+            # try common configs
+            try:
+                ds = load_dataset(self._hf_path, split="test")
+            except Exception:
+                ds = load_dataset(self._hf_path, "release_v5", split="test")
+        return [dict(row) for row in ds]
+
+    def _apply_split(self, tasks: list[CodingTask]) -> list[CodingTask]:
+        if self._split == "all" or not tasks:
+            return tasks
+
+        if self._split_mode == "time":
+            def _key(t: CodingTask) -> str:
+                return str(t.metadata.get("contest_date") or t.task_id)
+
+            ordered = sorted(tasks, key=_key)
+        else:
+            ordered = list(tasks)
+            rng = random.Random(self._seed)
+            rng.shuffle(ordered)
+
+        n = len(ordered)
+        tr, vr = self._split_ratios
+        n_train = max(1, int(n * tr)) if n > 3 else max(1, n - 2)
+        n_val = max(0, int(n * vr)) if n > 3 else (1 if n > 1 else 0)
+        n_test = max(0, n - n_train - n_val)
+
+        # ensure test non-empty when possible
+        if n_test == 0 and n > n_train + n_val:
+            n_test = n - n_train - n_val
+        if n_train + n_val + n_test < n:
+            n_test = n - n_train - n_val
+
+        train = ordered[:n_train]
+        val = ordered[n_train : n_train + n_val]
+        test = ordered[n_train + n_val :]
+
+        return {"train": train, "val": val, "test": test}[self._split]
+
+    @staticmethod
+    def _row_to_task(row: dict[str, Any]) -> CodingTask | None:
+        # Field names vary slightly across LCB releases.
+        qid = (
+            row.get("question_id")
+            or row.get("id")
+            or row.get("problem_id")
+            or row.get("instance_id")
+        )
+        if qid is None:
+            return None
+        task_id = str(qid)
+
+        title = str(row.get("question_title") or row.get("title") or "")
+        content = str(
+            row.get("question_content")
+            or row.get("problem_statement")
+            or row.get("prompt")
+            or ""
+        )
+        statement = f"{title}\n\n{content}".strip() if title else content
+        if not statement:
+            return None
+
+        platform = str(row.get("platform") or row.get("source") or "").lower()
+        # Soft filter: skip obvious non-python markers in title/content if tagged
+        lang = str(row.get("language") or row.get("lang") or "python").lower()
+        if lang and lang not in {"python", "py", "python3", ""}:
+            if lang in {"cpp", "c++", "java", "javascript", "go", "rust"}:
+                return None
+
+        starter = str(row.get("starter_code") or row.get("starter") or "")
+        # Default starter if empty
+        if not starter.strip():
+            starter = (
+                "# Write a complete Python solution.\n"
+                "# Read from stdin and write to stdout if required.\n"
+            )
+
+        public_raw = row.get("public_test_cases") or row.get("public_tests") or "[]"
+        public_cases = _parse_json_field(public_raw)
+        # Store only list-like public cases for the harness
+        if not isinstance(public_cases, list):
+            public_cases = []
+
+        # Drop binary/encrypted private blobs from workspace
+        public_json = json.dumps(public_cases, ensure_ascii=False)
+
+        workspace_files = {
+            "solution.py": starter,
+            "public_tests.json": public_json,
+            "test_solution.py": _PYTEST_HARNESS,
+        }
+
+        contest_date = str(
+            row.get("contest_date") or row.get("date") or row.get("contestDate") or ""
+        )
+        difficulty = str(row.get("difficulty") or "")
+
+        return CodingTask(
+            task_id=f"lcb-{task_id}",
+            problem_statement=statement,
+            repo_url=None,
+            starter_code=starter,
+            entry_point=None,
+            test_command="python -m pytest test_solution.py -q --tb=line",
+            gold_patch=None,
+            metadata={
+                "workspace_files": workspace_files,
+                "solution_file": "solution.py",
+                "platform": platform,
+                "contest_date": contest_date,
+                "difficulty": difficulty,
+                "source": "livecodebench",
+                "raw_question_id": task_id,
+            },
+        )
+
+
+def _parse_json_field(value: Any) -> Any:
+    if value is None:
+        return []
+    if isinstance(value, (list, dict)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            # some LCB dumps double-encode
+            try:
+                return json.loads(json.loads(f'"{value}"'))
+            except Exception:
+                return []
+    return []

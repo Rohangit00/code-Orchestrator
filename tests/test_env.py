@@ -150,12 +150,22 @@ async def test_cleanup_on_close(tmp_path: Path, local_repo: Path):
     assert not path.exists()
 
 
-def test_reset_requires_repo_url(tmp_path: Path):
+def test_reset_without_repo_url_uses_standalone(tmp_path: Path):
+    """No repo_url → standalone workspace (LiveCodeBench / contest path)."""
     env, _ = _env_with_patch(tmp_path, "")
     task = CodingTask(
         task_id="no-repo",
         problem_statement="x",
         repo_url=None,
+        metadata={
+            "workspace_files": {
+                "solution.py": "x = 1\n",
+                "test_solution.py": "def test_ok():\n    assert True\n",
+            }
+        },
+        test_command="python -m pytest test_solution.py -q",
     )
-    with pytest.raises(ValueError, match="repo_url"):
-        env.reset(task)
+    state = env.reset(task)
+    assert state is not None
+    assert state.task_description == "x"
+    env.close()

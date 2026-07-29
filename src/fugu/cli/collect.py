@@ -9,8 +9,8 @@ Usage::
     fugu-collect -c configs/default.yaml -d swebench-lite -n 50
     fugu-collect -d swebench-verified --strategy round-robin -o data/swe_buffer
 
-Only SWE-bench variants are supported for collection until a standalone
-Python workspace exists for HumanEval / MBPP.
+Primary dataset: LiveCodeBench (Python). SWE-bench variants remain available
+for repo-backed experiments.
 """
 
 from __future__ import annotations
@@ -36,8 +36,28 @@ from rich.table import Table
 console = Console()
 
 # Dataset name → (module path, class name, constructor kwargs)
-# SWE-bench only until standalone HumanEval/MBPP workspace support exists.
+# LiveCodeBench is the primary path; SWE-bench remains available.
 _DATASET_MAP: dict[str, tuple[str, str, dict]] = {
+    "livecodebench": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "all", "python_only": True},
+    ),
+    "livecodebench-train": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "train", "python_only": True},
+    ),
+    "livecodebench-val": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "val", "python_only": True},
+    ),
+    "livecodebench-test": (
+        "fugu.datasets.livecodebench",
+        "LiveCodeBenchDataset",
+        {"split": "test", "python_only": True},
+    ),
     "swebench-lite": (
         "fugu.datasets.swebench",
         "SWEBenchDataset",
@@ -150,8 +170,8 @@ def _load_strategies(strategy_name: str):
     "--dataset",
     "-d",
     type=click.Choice(_SUPPORTED_DATASETS, case_sensitive=False),
-    default="swebench-lite",
-    help="Benchmark dataset to collect from (SWE-bench variants only).",
+    default="livecodebench-train",
+    help="Dataset: livecodebench[-train|-val|-test] (default) or swebench-*.",
 )
 @click.option(
     "--max-tasks",

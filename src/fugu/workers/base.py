@@ -158,31 +158,31 @@ class BaseWorker(ABC):
 
     @staticmethod
     def _extract_patch(raw_output: str) -> str:
-        """Extract a git diff from raw model output.
+        """Extract a git diff **or** Python code from raw model output.
 
         Extraction strategy (first match wins):
 
-        1. **Fenced code block** — look for ````diff\\n…```` or
-           bare ````\\n…```` blocks.
-        2. **Diff header** — scan for lines starting with
-           ``diff --git``, ``---``, ``+++``, or ``@@``.
-        3. **Fallback** — return the entire output stripped.
+        1. Fenced ``diff`` / ``python`` / bare code blocks.
+        2. Unified diff headers (``diff --git``, ``--- a/``, …).
+        3. Fallback — entire output stripped (usable as Python for LCB).
 
         Returns:
-            The extracted patch text (may be empty if the model produced
-            nothing useful).
+            Extracted text (may be empty if the model produced nothing).
         """
         if not raw_output:
             return ""
 
-        # Strategy 1: fenced code block (```diff or bare ```)
-        code_block = re.search(
-            r"```(?:diff)?\s*\n(.*?)```", raw_output, re.DOTALL
-        )
-        if code_block:
-            return code_block.group(1).strip()
+        # Prefer explicit language fences
+        for lang in ("diff", "python", "py", ""):
+            if lang:
+                pat = rf"```{lang}\s*\n(.*?)```"
+            else:
+                pat = r"```\s*\n(.*?)```"
+            code_block = re.search(pat, raw_output, re.DOTALL | re.IGNORECASE)
+            if code_block:
+                return code_block.group(1).strip()
 
-        # Strategy 2: look for diff header lines
+        # Diff header lines
         lines = raw_output.split("\n")
         diff_lines: list[str] = []
         in_diff = False
@@ -198,5 +198,4 @@ class BaseWorker(ABC):
         if diff_lines:
             return "\n".join(diff_lines).strip()
 
-        # Strategy 3: return whole output as-is
         return raw_output.strip()

@@ -3,9 +3,11 @@
 Controlled smoke only. This is **not** authorization to run real third-party
 SWE-bench collection on the host.
 
+**Primary collect path:** LiveCodeBench (Python) — one Docker image with
+`pytest` is enough. SWE-bench remains optional for repo-backed experiments.
+
 Default config keeps `allow_host_execution: false` and `isolation_mode: host`.
-For untrusted remote SWE-bench clones, set `isolation_mode: docker` so tests
-run in a container (Fugu sandbox — **not** the official SWE-bench harness).
+For untrusted remote SWE-bench clones, set `isolation_mode: docker`.
 
 For the full staged checklist, see [VM_RUNBOOK.md](VM_RUNBOOK.md).
 
@@ -188,34 +190,33 @@ There is no project lockfile yet — keep this freeze for reproducibility.
 
 ---
 
-## Collect smoke (after workers + docker)
+## Collect smoke (LiveCodeBench — recommended)
 
-Fugu docker isolation sandboxes **test/compile** only. It does not match the
-official SWE-bench evaluation harness (per-instance images / FAIL_TO_PASS).
-Many instances may fail inside a slim image for missing deps — that is env
-fidelity, not a broken sandbox.
+One image with pytest is enough (no multi-repo SWE-bench stacks).
 
 ```bash
-# 1. Image available
-docker pull python:3.11-slim   # or a richer image with project deps
+# Image with pytest
+docker build -t fugu-py311-pytest - <<'EOF'
+FROM python:3.11-slim
+RUN pip install --no-cache-dir pytest
+EOF
 
-# 2. Same shell as worker URL exports
 export FUGU_ENV__ISOLATION_MODE=docker
 export FUGU_ENV__ALLOW_HOST_EXECUTION=false
-export FUGU_ENV__DOCKER_IMAGE=python:3.11-slim
+export FUGU_ENV__DOCKER_IMAGE=fugu-py311-pytest
+# + FUGU_WORKER__* URLs
 
-# 3. Single-task smoke only first
 fugu-collect \
   -c configs/default.yaml \
-  -d swebench-lite \
+  -d livecodebench-train \
   -s single-qwen \
-  -n 1 \
-  -o data/buffer_smoke
+  -n 5 \
+  -o data/buffer_lcb_train
 ```
 
-Do **not** set `allow_host_execution=true` for third-party GitHub clones.
+Splits: `livecodebench-train` / `livecodebench-val` / `livecodebench-test` / `livecodebench` (all).
 
-Scale `-n` only after logs show containerized tests and a buffer file appears.
+Optional SWE-bench: `-d swebench-lite` (harder; needs richer images).
 
 ---
 
