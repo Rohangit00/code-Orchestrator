@@ -53,6 +53,9 @@ data/
 outputs/
 /workspace/
 **/fugu_workspaces/
+# Local paper drafts (not for this repo)
+papers/
+
 # Keep the package src/fugu/workspace/ tracked (not the runtime dir)
 *.bin
 !tests/**/*.bin

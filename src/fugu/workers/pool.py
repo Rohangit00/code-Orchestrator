@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from fugu.core.actions import WORKER_ACTIONS, PlannerAction
+from fugu.core.actions import ENABLED_WORKER_ACTIONS, WORKER_ACTIONS, PlannerAction
 from fugu.workers.base import BaseWorker
 
 if TYPE_CHECKING:
@@ -89,46 +89,36 @@ class WorkerPool:
     def from_config(cls, config: WorkerConfig) -> WorkerPool:
         """Create a production pool from a :class:`WorkerConfig`.
 
-        Instantiates one :class:`~fugu.workers.vllm.VLLMWorker` per
-        configured endpoint (Qwen, Gemma, Ornith).
+        Registers **enabled** workers only (Qwen + Ornith). Gemma remains
+        in config for compatibility but is not connected unless re-enabled
+        in :data:`~fugu.core.actions.ENABLED_WORKER_ACTIONS`.
         """
         # Local import to avoid circular dependency at module level
         from fugu.workers.vllm import VLLMWorker
 
         pool = cls()
-        pool.register(
-            PlannerAction.CALL_QWEN,
-            VLLMWorker(
-                name="qwen",
-                base_url=config.qwen_url,
-                timeout=config.timeout,
-                max_tokens=config.max_tokens,
-                temperature=config.temperature,
-            ),
-        )
-        pool.register(
-            PlannerAction.CALL_GEMMA,
-            VLLMWorker(
-                name="gemma",
-                base_url=config.gemma_url,
-                timeout=config.timeout,
-                max_tokens=config.max_tokens,
-                temperature=config.temperature,
-            ),
-        )
-        pool.register(
-            PlannerAction.CALL_ORNITH,
-            VLLMWorker(
-                name="ornith",
-                base_url=config.ornith_url,
-                timeout=config.timeout,
-                max_tokens=config.max_tokens,
-                temperature=config.temperature,
-            ),
-        )
+        endpoints: list[tuple[PlannerAction, str, str]] = [
+            (PlannerAction.CALL_QWEN, "qwen", config.qwen_url),
+            (PlannerAction.CALL_ORNITH, "ornith", config.ornith_url),
+            # Gemma deliberately omitted while disabled
+        ]
+        for action, name, url in endpoints:
+            if action not in ENABLED_WORKER_ACTIONS:
+                continue
+            pool.register(
+                action,
+                VLLMWorker(
+                    name=name,
+                    base_url=url,
+                    timeout=config.timeout,
+                    max_tokens=config.max_tokens,
+                    temperature=config.temperature,
+                ),
+            )
         logger.info(
-            "Created worker pool from config with %d workers",
+            "Created worker pool from config with %d workers (enabled: %s)",
             len(pool._workers),
+            sorted(a.name for a in ENABLED_WORKER_ACTIONS),
         )
         return pool
 
@@ -137,15 +127,18 @@ class WorkerPool:
         """Create a pool populated with :class:`MockWorker` instances.
 
         Useful for unit and integration tests that do not require real
-        vLLM servers.
+        vLLM servers. Only **enabled** workers are registered.
         """
         from fugu.workers.mock import MockWorker
 
         pool = cls()
-        pool.register(PlannerAction.CALL_QWEN, MockWorker("mock_qwen"))
-        pool.register(PlannerAction.CALL_GEMMA, MockWorker("mock_gemma"))
-        pool.register(PlannerAction.CALL_ORNITH, MockWorker("mock_ornith"))
-        logger.info("Created mock worker pool")
+        for action, name in (
+            (PlannerAction.CALL_QWEN, "mock_qwen"),
+            (PlannerAction.CALL_ORNITH, "mock_ornith"),
+        ):
+            if action in ENABLED_WORKER_ACTIONS:
+                pool.register(action, MockWorker(name))
+        logger.info("Created mock worker pool (%d workers)", len(pool._workers))
         return pool
 
     # -- Introspection -------------------------------------------------------

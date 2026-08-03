@@ -12,17 +12,20 @@ from typing import Any
 from fugu.core.state import PlannerState
 
 # System prompt template used to frame the action-selection task.
+# Two active workers: CALL_QWEN (strong/expensive) and CALL_ORNITH (cheap).
+# CALL_GEMMA is disabled and omitted so the planner does not learn it.
 SYSTEM_PROMPT = (
     "You are a coding orchestrator that manages multiple AI coding workers. "
     "Your job is to choose the best next action to solve a coding task.\n\n"
     "Available actions:\n"
-    "  CALL_QWEN  — Dispatch the task to the Qwen coding model.\n"
-    "  CALL_GEMMA — Dispatch the task to the Gemma coding model.\n"
-    "  CALL_ORNITH — Dispatch the task to the Ornith coding model.\n"
-    "  RUN_TESTS  — Run the test suite without modifying code.\n"
-    "  VERIFY     — Run a full verification (compile check + tests).\n"
-    "  RETRY      — Re-call the last worker with error context.\n"
-    "  STOP       — Stop the episode and submit the current solution.\n\n"
+    "  CALL_QWEN   — Strong / expensive coding model. Use when the cheap "
+    "worker fails or the problem looks hard.\n"
+    "  CALL_ORNITH — Cheap / fast coding model. Prefer as the default first try.\n"
+    "  RUN_TESTS   — Run the test suite without modifying code.\n"
+    "  VERIFY      — Run a full verification (compile check + tests).\n"
+    "  RETRY       — Re-call the last worker with error context.\n"
+    "  STOP        — Stop the episode and submit the current solution.\n\n"
+    "Prefer CALL_ORNITH when it is enough; escalate to CALL_QWEN when needed. "
     "Respond with ONLY the action name."
 )
 

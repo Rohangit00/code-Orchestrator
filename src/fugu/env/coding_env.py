@@ -266,7 +266,17 @@ class CodingEnvironment:
         # True when this step executed a fresh test evaluation.
         tests_were_evaluated = False
 
-        if action.is_worker_call:
+        # Disabled workers (e.g. CALL_GEMMA): refuse without calling HTTP.
+        from fugu.core.actions import is_enabled_worker
+
+        if action.is_worker_call and not is_enabled_worker(action):
+            error_msg = (
+                f"{action.name} is disabled; only enabled workers may be called"
+            )
+            logger.warning(error_msg)
+            latency_ms = (time.monotonic() - step_start) * 1000.0
+            # Fall through to state update / reward with no worker side effects.
+        elif action.is_worker_call:
             # ----------------------------------------------------------
             # Worker call: CALL_QWEN, CALL_GEMMA, CALL_ORNITH
             # ----------------------------------------------------------
@@ -460,8 +470,16 @@ class CodingEnvironment:
         is_terminal = self._done
 
         # ------------------------------------------------------------------
-        # Compute reward
+        # Compute reward (worker-aware cost; latency weight default 0)
         # ------------------------------------------------------------------
+        if action.is_worker_call:
+            billed_worker: PlannerAction | None = action
+        elif action is PlannerAction.RETRY:
+            # Bill the worker that was re-invoked (tracked before/during RETRY).
+            billed_worker = self._last_worker_action
+        else:
+            billed_worker = None
+
         reward = self._reward.compute(
             action=action,
             tests_before=tests_before,
@@ -472,6 +490,7 @@ class CodingEnvironment:
             is_terminal=is_terminal,
             all_tests_passed=all_tests_passed,
             budget_exhausted=budget_exhausted,
+            billed_worker=billed_worker,
         )
 
         # ------------------------------------------------------------------

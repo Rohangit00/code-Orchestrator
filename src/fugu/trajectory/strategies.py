@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from fugu.core.actions import PlannerAction
+from fugu.core.actions import ENABLED_WORKER_ACTIONS, PlannerAction, is_enabled_worker
 from fugu.core.state import PlannerState
 
 
@@ -69,7 +69,12 @@ class SingleWorkerStrategy(BaseStrategy):
         if not worker_action.is_worker_call:
             raise ValueError(
                 f"{worker_action!r} is not a worker action. "
-                "Must be one of CALL_QWEN, CALL_GEMMA, CALL_ORNITH."
+                "Must be one of CALL_QWEN, CALL_ORNITH (enabled workers)."
+            )
+        if not is_enabled_worker(worker_action):
+            raise ValueError(
+                f"{worker_action.name} is disabled. "
+                f"Enabled workers: {sorted(a.name for a in ENABLED_WORKER_ACTIONS)}"
             )
         self._worker_action = worker_action
         self._max_retries = max_retries
@@ -95,19 +100,18 @@ class SingleWorkerStrategy(BaseStrategy):
 
 
 class RoundRobinStrategy(BaseStrategy):
-    """Cycles through workers; env evaluates after each worker call.
+    """Cycles through enabled workers; env evaluates after each worker call.
 
-    Pattern::
+    Pattern (Gemma disabled)::
 
-        CALL_QWEN -> CALL_GEMMA -> CALL_ORNITH -> STOP
+        CALL_ORNITH -> CALL_QWEN -> STOP
 
-    Early ``STOP`` if tests already fully pass (env may have auto-terminated).
+    Cheap worker first, then expensive. Early ``STOP`` if tests already pass.
     """
 
     _WORKERS = [
-        PlannerAction.CALL_QWEN,
-        PlannerAction.CALL_GEMMA,
         PlannerAction.CALL_ORNITH,
+        PlannerAction.CALL_QWEN,
     ]
 
     @property
@@ -138,19 +142,30 @@ class RetryOnFailStrategy(BaseStrategy):
 
     def __init__(
         self,
-        primary_action: PlannerAction = PlannerAction.CALL_QWEN,
+        primary_action: PlannerAction = PlannerAction.CALL_ORNITH,
         max_retries: int = 2,
         fallback_actions: list[PlannerAction] | None = None,
     ) -> None:
         if not primary_action.is_worker_call:
             raise ValueError(f"{primary_action!r} is not a worker action.")
+        if not is_enabled_worker(primary_action):
+            raise ValueError(f"{primary_action.name} is disabled.")
         self._primary = primary_action
         self._max_retries = max_retries
-        self._fallbacks = fallback_actions or [
+        default_fb = [
             a
-            for a in [PlannerAction.CALL_GEMMA, PlannerAction.CALL_ORNITH]
-            if a != primary_action
+            for a in (PlannerAction.CALL_ORNITH, PlannerAction.CALL_QWEN)
+            if a != primary_action and is_enabled_worker(a)
         ]
+        if fallback_actions is None:
+            self._fallbacks = default_fb
+        else:
+            bad = [a for a in fallback_actions if not is_enabled_worker(a)]
+            if bad:
+                raise ValueError(
+                    f"Disabled worker(s) in fallbacks: {[a.name for a in bad]}"
+                )
+            self._fallbacks = list(fallback_actions)
 
     @property
     def name(self) -> str:
@@ -186,10 +201,12 @@ class VerifyFirstStrategy(BaseStrategy):
 
     def __init__(
         self,
-        worker_action: PlannerAction = PlannerAction.CALL_QWEN,
+        worker_action: PlannerAction = PlannerAction.CALL_ORNITH,
     ) -> None:
         if not worker_action.is_worker_call:
             raise ValueError(f"{worker_action!r} is not a worker action.")
+        if not is_enabled_worker(worker_action):
+            raise ValueError(f"{worker_action.name} is disabled.")
         self._worker_action = worker_action
 
     @property
@@ -212,14 +229,13 @@ class VerifyFirstStrategy(BaseStrategy):
 
 
 ALL_STRATEGIES: list[BaseStrategy] = [
-    SingleWorkerStrategy(PlannerAction.CALL_QWEN, max_retries=2),
-    SingleWorkerStrategy(PlannerAction.CALL_GEMMA, max_retries=2),
     SingleWorkerStrategy(PlannerAction.CALL_ORNITH, max_retries=2),
+    SingleWorkerStrategy(PlannerAction.CALL_QWEN, max_retries=2),
     RoundRobinStrategy(),
     RetryOnFailStrategy(
-        primary_action=PlannerAction.CALL_QWEN,
+        primary_action=PlannerAction.CALL_ORNITH,
         max_retries=2,
-        fallback_actions=[PlannerAction.CALL_GEMMA, PlannerAction.CALL_ORNITH],
+        fallback_actions=[PlannerAction.CALL_QWEN],
     ),
-    VerifyFirstStrategy(PlannerAction.CALL_QWEN),
+    VerifyFirstStrategy(PlannerAction.CALL_ORNITH),
 ]

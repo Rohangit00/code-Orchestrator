@@ -226,9 +226,14 @@ fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen
 |------|---------|
 | `-d livecodebench-train` | Train split (default for collect) |
 | `-d livecodebench-val` / `-test` / `livecodebench` | Other splits / all |
-| `-s single-qwen` | CLI name (not `single_worker_call_qwen`) |
+| `-s single-qwen` | Strong/expensive worker only |
+| `-s single-ornith` | Cheap worker only (preferred default try) |
+| `-s retry-on-fail` | Ornith → RETRY* → escalate Qwen |
+| `-s round-robin` | Ornith → Qwen → STOP (Gemma disabled) |
 | `-n 1` | Smoke |
 | `-o dir` | Buffer directory (use unique names) |
+
+**Active workers:** Qwen + Ornith only. `CALL_GEMMA` remains in the enum for compatibility but is **disabled** (not in prompt, not registered by default, env refuses, not in strategies).
 
 ### Buffer format
 

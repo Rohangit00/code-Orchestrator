@@ -12,6 +12,11 @@ def test_build_planner_prompt_includes_system_and_state():
     assert "coding orchestrator" in prompt.lower() or "CALL_QWEN" in prompt
     assert "hello task" in prompt
     assert SYSTEM_PROMPT.split("\n")[0] in prompt or "CALL_QWEN" in prompt
+    assert "CALL_QWEN" in prompt
+    assert "CALL_ORNITH" in prompt
+    # Gemma disabled — must not appear in planner prompt
+    assert "CALL_GEMMA" not in prompt
+    assert "CALL_GEMMA" not in SYSTEM_PROMPT
 
 
 def test_tokenizer_training_uses_shared_builder():

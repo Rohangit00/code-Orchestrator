@@ -58,6 +58,30 @@ WORKER_ACTIONS: frozenset[PlannerAction] = frozenset({
     PlannerAction.CALL_ORNITH,
 })
 
+# Active workers for orchestration / reward / prompts.
+# CALL_GEMMA stays in the enum and WORKER_ACTIONS for compatibility, but is
+# disabled: not registered by default, not listed in the planner prompt, not
+# used by strategies, and refused by the environment.
+ENABLED_WORKER_ACTIONS: frozenset[PlannerAction] = frozenset({
+    PlannerAction.CALL_QWEN,
+    PlannerAction.CALL_ORNITH,
+})
+
+DISABLED_WORKER_ACTIONS: frozenset[PlannerAction] = frozenset(
+    WORKER_ACTIONS - ENABLED_WORKER_ACTIONS
+)
+
+
+def is_enabled_worker(action: PlannerAction) -> bool:
+    """Return True if *action* is a worker call that is currently enabled."""
+    return action in ENABLED_WORKER_ACTIONS
+
+
 ACTION_NAMES: dict[PlannerAction, str] = {action: action.name for action in PlannerAction}
+
+# Actions the planner may emit (disabled workers excluded).
+ACTIVE_ACTIONS: frozenset[PlannerAction] = frozenset(
+    a for a in PlannerAction if a not in DISABLED_WORKER_ACTIONS
+)
 
 NUM_ACTIONS: int = len(PlannerAction)

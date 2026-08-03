@@ -83,7 +83,6 @@ _SUPPORTED_DATASETS = tuple(_DATASET_MAP.keys())
 _STRATEGY_CLI_CHOICES = (
     "all",
     "single-qwen",
-    "single-gemma",
     "single-ornith",
     "round-robin",
     "retry-on-fail",
@@ -126,22 +125,17 @@ def _load_strategies(strategy_name: str):
         "single-qwen": lambda: SingleWorkerStrategy(
             PlannerAction.CALL_QWEN, max_retries=2
         ),
-        "single-gemma": lambda: SingleWorkerStrategy(
-            PlannerAction.CALL_GEMMA, max_retries=2
-        ),
         "single-ornith": lambda: SingleWorkerStrategy(
             PlannerAction.CALL_ORNITH, max_retries=2
         ),
         "round-robin": RoundRobinStrategy,
+        # Cheap primary, escalate to strong Qwen
         "retry-on-fail": lambda: RetryOnFailStrategy(
-            primary_action=PlannerAction.CALL_QWEN,
+            primary_action=PlannerAction.CALL_ORNITH,
             max_retries=2,
-            fallback_actions=[
-                PlannerAction.CALL_GEMMA,
-                PlannerAction.CALL_ORNITH,
-            ],
+            fallback_actions=[PlannerAction.CALL_QWEN],
         ),
-        "verify-first": lambda: VerifyFirstStrategy(PlannerAction.CALL_QWEN),
+        "verify-first": lambda: VerifyFirstStrategy(PlannerAction.CALL_ORNITH),
     }
 
     if key in factories:

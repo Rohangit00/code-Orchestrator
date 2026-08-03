@@ -15,7 +15,12 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 
-from fugu.core.actions import ACTION_NAMES, NUM_ACTIONS, PlannerAction
+from fugu.core.actions import (
+    ACTION_NAMES,
+    DISABLED_WORKER_ACTIONS,
+    NUM_ACTIONS,
+    PlannerAction,
+)
 from fugu.core.state import PlannerState
 from fugu.planner.prompts import SYSTEM_PROMPT, build_planner_prompt
 
@@ -162,9 +167,13 @@ class PlannerModel:
         # Logits for the *next* token (last position in the sequence)
         next_token_logits = outputs.logits[0, -1, :]  # (vocab_size,)
 
-        # Map each action name to its first token ID and extract its logit
+        # Map each *active* action name to its first token ID / logit.
+        # Disabled workers (CALL_GEMMA) get -inf so they cannot win.
         action_logits: dict[PlannerAction, float] = {}
         for action in PlannerAction:
+            if action in DISABLED_WORKER_ACTIONS:
+                action_logits[action] = float("-inf")
+                continue
             action_name = ACTION_NAMES[action]
             token_ids = self.tokenizer.encode(
                 action_name, add_special_tokens=False
@@ -174,15 +183,18 @@ class PlannerModel:
             else:
                 action_logits[action] = float("-inf")
 
-        # Softmax over the action logits only
+        # Softmax over active actions only (disabled stay 0 after renormalize)
+        active = [a for a in PlannerAction if a not in DISABLED_WORKER_ACTIONS]
         logit_values = torch.tensor(
-            [action_logits[a] for a in PlannerAction],
+            [action_logits[a] for a in active],
             dtype=torch.float32,
         )
         probs = torch.softmax(logit_values, dim=0)
 
-        action_probs: dict[PlannerAction, float] = {}
-        for i, action in enumerate(PlannerAction):
+        action_probs: dict[PlannerAction, float] = {
+            a: 0.0 for a in PlannerAction
+        }
+        for i, action in enumerate(active):
             action_probs[action] = probs[i].item()
 
         best_action = max(action_probs, key=action_probs.get)  # type: ignore[arg-type]
@@ -253,19 +265,29 @@ class PlannerModel:
     def _parse_action(text: str) -> PlannerAction:
         """Extract a PlannerAction from generated text.
 
-        Scans the text for any known action name (case-insensitive).
-        Falls back to ``STOP`` if nothing matches.
+        Scans the text for any known **active** action name (case-insensitive).
+        Disabled workers (e.g. ``CALL_GEMMA``) are ignored. Falls back to
+        ``STOP`` if nothing matches.
         """
         normalized = text.strip().upper()
 
-        # Try exact match first
+        # Try exact match first (only if enabled)
         try:
-            return PlannerAction.from_string(normalized)
+            action = PlannerAction.from_string(normalized)
+            if action not in DISABLED_WORKER_ACTIONS:
+                return action
+            logger.warning(
+                "Model emitted disabled action %s — defaulting to STOP",
+                action.name,
+            )
+            return PlannerAction.STOP
         except ValueError:
             pass
 
-        # Scan for any action name embedded in the text
+        # Scan for any active action name embedded in the text
         for action in PlannerAction:
+            if action in DISABLED_WORKER_ACTIONS:
+                continue
             if ACTION_NAMES[action] in normalized:
                 return action
 
