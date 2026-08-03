@@ -18,6 +18,7 @@ Tip commit for LCB: **`6465c4f`** or later on `main`.
 | Unit tests (57) | Yes |
 | LCB collect smoke (`-n 1`) | Yes after image + workers |
 | LCB scale collect (`-n 20`) | Yes; **analyze buffer** before train (Stage 6) |
+| LCB **production** multi-strategy collect | Yes — Stage **6b** (unique `-o`, merge, train) |
 | LCB train from buffer | Yes after healthy buffer summary + CUDA torch |
 | Full SWE-bench Lite @ official harness | Separate tool (`swebench`); lots of disk if scaled |
 | Host execution of untrusted git tests | No — keep `allow_host_execution: false` |
@@ -196,23 +197,6 @@ fugu-collect \
   -o "data/buffer_lcb_smoke_$(date +%Y%m%d_%H%M%S)"
 ```
 
-### Scale (`-n 20`) then analyze before train
-
-```bash
-fugu-collect -d livecodebench-train -s single-qwen -n 20 -o data/buffer_lcb_train
-```
-
-**Do not jump straight to train** until you have checked the buffer (next subsection).
-A tiny 20-task buffer is for **pipeline smoke** (collect finished + labels sane), not paper numbers.
-
-If long runs hang (e.g. after ~12 tasks), chunk and raise timeouts:
-
-```bash
-fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen_a
-fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen_b
-# raise worker / docker test timeouts via config or FUGU_* if needed
-```
-
 ### What `fugu-collect` does (LCB)
 
 1. Load HF LiveCodeBench problems (train split if `-d livecodebench-train`)  
@@ -224,23 +208,48 @@ fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen
 
 | Flag | Meaning |
 |------|---------|
-| `-d livecodebench-train` | Train split (default for collect) |
-| `-d livecodebench-val` / `-test` / `livecodebench` | Other splits / all |
-| `-s single-qwen` | Strong/expensive worker only |
-| `-s single-ornith` | Cheap worker only (preferred default try) |
+| `-d livecodebench-train` | **Train split only** for BC data (default) |
+| `-d livecodebench-val` / `-test` | Held-out eval — **do not** train on these |
+| `-s single-ornith` | Cheap worker only (frugal prior) |
+| `-s single-qwen` | Strong / expensive worker only |
 | `-s retry-on-fail` | Ornith → RETRY* → escalate Qwen |
-| `-s round-robin` | Ornith → Qwen → STOP (Gemma disabled) |
-| `-n 1` | Smoke |
-| `-o dir` | Buffer directory (use unique names) |
+| `-s round-robin` | Ornith → Qwen → STOP |
+| `-s verify-first` | VERIFY then worker |
+| `-n N` | Max tasks (omit = entire split) |
+| `-o DIR` | Buffer directory (**must be unique every run** — see below) |
 
-**Active workers:** Qwen + Ornith only. `CALL_GEMMA` remains in the enum for compatibility but is **disabled** (not in prompt, not registered by default, env refuses, not in strategies).
+**Active workers:** Qwen + Ornith only. `CALL_GEMMA` is disabled (enum kept; not in prompt/strategies/pool).
+
+---
+
+### Rule: unique `-o` every run
+
+`-o` is the folder where that job writes `buffer.jsonl`.
+
+**Reusing the same path overwrites** the previous buffer when the new job saves. A failed 3-task run can wipe a good 50-task buffer.
+
+**Always use a timestamped path:**
+
+```bash
+-o "data/buffer_lcb_ornith_$(date +%Y%m%d_%H%M%S)"
+```
+
+Examples of good names:
+
+```bash
+-o "data/buffer_lcb_ornith_$(date +%Y%m%d_%H%M%S)"
+-o "data/buffer_lcb_escalate_$(date +%Y%m%d_%H%M%S)"
+-o "data/buffer_lcb_qwen_$(date +%Y%m%d_%H%M%S)"
+```
+
+After many runs you will have several directories under `data/`. Keep the good ones; merge later for train. `data/` is gitignored (may look grey in the IDE — use the terminal).
+
+---
 
 ### Buffer format
 
 - File is often named `buffer.jsonl` but content is **binary** (`FUGU_RB` + zstd).  
-- Do not open as text; use `ReplayBuffer.load` (see VM_START).  
-- `data/` is gitignored (grey in IDE).  
-- Reusing the same `-o` **overwrites**; empty failed runs can wipe good data.
+- Do **not** `cat` it; use `ReplayBuffer.load` (analyze section below).  
 
 ### Permissions
 
@@ -248,13 +257,12 @@ If you see `Permission denied` on files under `/workspace`:
 
 ```bash
 unset FUGU_ENV__DOCKER_USER
-# or match host: export FUGU_ENV__DOCKER_USER="$(id -u):$(id -g)"
-# chown workspace dirs if needed
+# or: export FUGU_ENV__DOCKER_USER="$(id -u):$(id -g)"
 ```
 
-LCB workspaces live under `repo.workspace_dir` (default `/tmp/fugu_workspaces`) + `standalone/`.
+LCB workspaces: `repo.workspace_dir` (default `/tmp/fugu_workspaces`) + `standalone/`.
 
-### Success / failure
+### Success / failure (any collect)
 
 | Good | Bad for training |
 |------|------------------|
@@ -262,17 +270,100 @@ LCB workspaces live under `repo.workspace_dir` (default `/tmp/fugu_workspaces`) 
 | Real pytest output | Permission denied on mount |
 | Some tests pass/fail counts | Always empty zero tests |
 
-### Analyze `-n 20` (or any) buffer
+---
 
-`buffer.jsonl` is **binary** (`FUGU_RB` + msgpack + zstd). Do not `cat` it.
-`data/` is gitignored (often grey in IDEs) — use the terminal.
+## Stage 6b — Production collect (real training data)
+
+Smoke (`-n 1`) only proves the pipe. For **actual BC data**, collect **multi-strategy** trajectories on **`livecodebench-train`**, analyze each buffer, merge, then train.
+
+### 1. Session setup
 
 ```bash
-ls -lah data/buffer_lcb_train/
-file data/buffer_lcb_train/buffer.jsonl
+cd clever-turing
+git pull
+source .venv/bin/activate
+source env_vm.sh   # HF_TOKEN, Qwen + Ornith URLs, docker isolation
+
+# Confirm config (Gemma not required)
+python - <<'PY'
+from fugu.config import FuguConfig
+from fugu.core.actions import ENABLED_WORKER_ACTIONS
+c = FuguConfig.from_yaml("configs/default.yaml")
+print("isolation:", c.env.isolation_mode, "image:", c.env.docker_image)
+print("qwen:", c.worker.qwen_url)
+print("ornith:", c.worker.ornith_url)
+print("enabled:", sorted(a.name for a in ENABLED_WORKER_ACTIONS))
+PY
+
+curl -sS "${FUGU_WORKER__QWEN_URL}/models" | head -c 200; echo
+curl -sS "${FUGU_WORKER__ORNITH_URL}/models" | head -c 200; echo
+
+screen -S fugu   # long runs: Ctrl-A D to detach; screen -r fugu to reattach
 ```
 
-**Full summary script** (repo root, venv active). Change `path` if you used a different `-o`:
+### 2. What to collect (strategy mix)
+
+| Strategy | Role |
+|----------|------|
+| `single-ornith` | Cheap default — frugal prior |
+| `retry-on-fail` | Escalate Ornith → Qwen when cheap fails (**most important**) |
+| `single-qwen` | Strong baseline / hard problems |
+| `round-robin` | Both workers in one episode (optional) |
+
+Do **not** only run `single-qwen`. That does not teach cheap-vs-strong routing.
+
+### 3. Recommended first real run (`-n 50` per strategy)
+
+Use **unique timestamped `-o` every command**. Raise `N` to 100–200 when stable.
+
+```bash
+# inside screen, venv + env_vm.sh already sourced
+N=50
+
+fugu-collect -c configs/default.yaml \
+  -d livecodebench-train -s single-ornith -n $N \
+  -o "data/buffer_lcb_ornith_$(date +%Y%m%d_%H%M%S)"
+
+fugu-collect -c configs/default.yaml \
+  -d livecodebench-train -s retry-on-fail -n $N \
+  -o "data/buffer_lcb_escalate_$(date +%Y%m%d_%H%M%S)"
+
+fugu-collect -c configs/default.yaml \
+  -d livecodebench-train -s single-qwen -n $N \
+  -o "data/buffer_lcb_qwen_$(date +%Y%m%d_%H%M%S)"
+
+# optional
+fugu-collect -c configs/default.yaml \
+  -d livecodebench-train -s round-robin -n $N \
+  -o "data/buffer_lcb_rr_$(date +%Y%m%d_%H%M%S)"
+```
+
+List what you got:
+
+```bash
+ls -lah data/buffer_lcb_*
+```
+
+### 4. Scale further (same rules)
+
+| Goal | How |
+|------|-----|
+| More tasks per strategy | Larger `-n` (e.g. 100, 200) or omit `-n` for **entire** train split (long) |
+| Avoid mid-run wipe | **Never** reuse `-o`; always `$(date +%Y%m%d_%H%M%S)` |
+| Hangs / timeouts | Smaller `-n`; raise worker / docker test timeouts; check vLLM logs |
+| Task index note | There is **no `--offset`**: `-n N` is always the **first N** train tasks. Different strategies on the same first N is fine (diverse labels on shared problems). To cover more problems, use a **larger** `-n` in one job. |
+
+Example larger escalate collect:
+
+```bash
+fugu-collect -c configs/default.yaml \
+  -d livecodebench-train -s retry-on-fail -n 200 \
+  -o "data/buffer_lcb_escalate_$(date +%Y%m%d_%H%M%S)"
+```
+
+### 5. Analyze each buffer (before train)
+
+Set `path` to **that run’s** `buffer.jsonl` (from `ls data/buffer_lcb_*`).
 
 ```bash
 python - <<'PY'
@@ -281,7 +372,8 @@ from collections import Counter
 from fugu.buffer.replay_buffer import ReplayBuffer
 from fugu.training.filter import group_episodes, episode_return, episode_solved
 
-path = Path("data/buffer_lcb_train/buffer.jsonl")  # change if needed
+# EDIT to the folder you just collected
+path = Path("data/buffer_lcb_ornith_YYYYMMDD_HHMMSS/buffer.jsonl")
 assert path.exists(), path
 
 buf = ReplayBuffer(capacity=100_000, storage_dir=str(path.parent))
@@ -296,41 +388,34 @@ actions = Counter(t.action.name for t in transitions)
 print("\n=== ACTIONS ===")
 for k, v in actions.most_common():
     print(f"  {k:12s} {v}")
+print("CALL_GEMMA count (should be 0):",
+      sum(1 for t in transitions if t.action.name == "CALL_GEMMA"))
 
 eps = group_episodes(transitions)
 print(f"\n=== EPISODES ===")
-print(f"episodes: {len(eps)}  (expect ~20 if -n 20 finished)")
+print(f"episodes: {len(eps)}")
 
-solved = 0
-returns = []
-steps = []
-rows = []
+solved = sum(1 for ep in eps if episode_solved(ep))
+returns = [episode_return(ep) for ep in eps]
+steps = [len(ep) for ep in eps]
+print(f"solved: {solved}/{len(eps)}")
+if returns:
+    print(f"return: mean={sum(returns)/len(returns):.3f}  "
+          f"min={min(returns):.3f}  max={max(returns):.3f}")
+    print(f"steps/ep: mean={sum(steps)/len(steps):.1f}  max={max(steps)}")
+
+print("\n#  task_id                    steps   return  solved  p/f/e  tail")
 for i, ep in enumerate(eps):
-    ret = episode_return(ep)
-    ok = episode_solved(ep)
-    solved += int(ok)
-    returns.append(ret)
-    steps.append(len(ep))
     last = ep[-1]
     ta = last.metadata.tests_after
     p = f = e = 0
     out = ""
     if ta is not None:
         p, f, e = ta.passed, ta.failed, ta.errors
-        out = (ta.output or "")[:120].replace("\n", " ")
-    tid = getattr(last.state, "task_id", "") or getattr(last.metadata, "task_id", "") or "?"
-    rows.append((i, tid, len(ep), ret, ok, p, f, e, out))
-
-print(f"solved (all public tests pass at end): {solved}/{len(eps)}")
-if returns:
-    print(f"return: mean={sum(returns)/len(returns):.3f}  "
-          f"min={min(returns):.3f}  max={max(returns):.3f}")
-    print(f"steps/ep: mean={sum(steps)/len(steps):.1f}  max={max(steps)}")
-
-print("\n#  task_id                    steps   return  solved  p/f/e  tail output")
-for i, tid, n, ret, ok, p, f, e, out in rows:
-    print(f"{i:2d}  {str(tid)[:24]:24s}  {n:3d}  {ret:7.2f}  {ok!s:5s}  "
-          f"{p}/{f}/{e}  {out[:80]}")
+        out = (ta.output or "")[:80].replace("\n", " ")
+    tid = getattr(last.state, "task_id", "") or "?"
+    print(f"{i:2d}  {str(tid)[:24]:24s}  {len(ep):3d}  {episode_return(ep):7.2f}  "
+          f"{episode_solved(ep)!s:5s}  {p}/{f}/{e}  {out}")
 
 bad = 0
 for t in transitions:
@@ -338,90 +423,95 @@ for t in transitions:
     if ta and ("No module named pytest" in (ta.output or "")
                or "Permission denied" in (ta.output or "")):
         bad += 1
-print(f"\ntransitions with pytest-missing or permission errors: {bad}")
-
-from fugu.training.filter import filter_transitions
-kept = filter_transitions(transitions, min_return=0.0)
-print(f"kept after min_return=0: {len(kept)} / {len(transitions)}")
+print(f"\npytest-missing or permission errors: {bad}")
 PY
 ```
 
-`fugu-collect` also prints a **Collection Summary** (transition count, elapsed, path) when the job finishes. If that table never appeared, the job was killed/timed out — the buffer may still load with fewer episodes.
-
 #### How to read the numbers
 
-| Signal | Healthy `-n 20` | Unhealthy |
-|--------|-----------------|-----------|
-| **Episodes** | ≈ 20 (or slightly fewer if one task crashed) | 0, or hung midway (e.g. stop at ~12) |
-| **Transitions** | A few × episodes (CALL → tests → RETRY* → STOP) | 0 |
-| **Actions** | Mix of `CALL_QWEN`, maybe `RETRY`, `STOP` | Only `STOP`, or never `CALL_*` |
-| **Solved rate** | Can be low (contest hard + single worker); even **0/20** can still train if tests ran | N/A for “smoke OK” |
-| **Return** | Some positive (test Δ / terminal +2) | All ~0 with empty tests |
-| **Test output** | Real pytest pass/fail | `No module named pytest`, always empty, permission errors |
-| **SyntaxError on solution** | Rare after `code_format=python` | Many → worker still emitting diffs |
+| Signal | Healthy | Unhealthy |
+|--------|---------|-----------|
+| **Episodes** | ≈ your `-n` | 0, or stuck mid-run |
+| **Transitions** | &gt; 0 | 0 |
+| **Actions** | Match strategy (escalate: Ornith + some Qwen) | Only STOP; unexpected `CALL_GEMMA` |
+| **Solved rate** | Can be low on hard LCB | N/A for “collect OK” |
+| **Test output** | Real pytest p/f/e | pytest missing / always empty / permission |
 
-**Smoke success ≠ high solve rate.** For `-n 20` you mainly want:
+**Collect OK ≠ high solve rate.** Require: run finished, tests real, no systemic harness bugs.
 
-1. Run **finished** (≈20 episodes, not stuck after ~12).  
-2. **Transitions &gt; 0**.  
-3. Tests **actually ran** (p/f/e not always 0/0/0 with empty output).  
-4. **No systemic harness bugs** (pytest missing, docker perms, pure-diff SyntaxError).
+#### Fix before train if bad
 
-#### Practical bar: good enough to train on this buffer
+| Symptom | Fix |
+|---------|-----|
+| `No module named pytest` | Rebuild `fugu-py311-pytest`; set `FUGU_ENV__DOCKER_IMAGE` |
+| Permission denied | `unset FUGU_ENV__DOCKER_USER` or set `uid:gid` |
+| Hung mid-run | Smaller `-n`, raise timeouts, check vLLM; re-run with **new** `-o` |
+| 0 transitions | Read collect log / screen scrollback |
 
-- ≥ ~15 episodes completed  
-- Transitions &gt; 0  
-- 0 systemic pytest/permission errors  
-- Some episodes with **non-zero** test counts  
-- Ideally ≥1 positive return (not required)
+### 6. Merge good buffers for training
 
-**Do not train** on buffers full of pytest-missing / permission garbage — labels are wrong.
-
-#### Decision tree
-
-```text
--n 20 finished?
-  ├─ no  → fix hang/timeouts; re-collect in chunks with unique -o
-  └─ yes → tests real + transitions > 0?
-              ├─ no  → fix docker/image/format; re-collect unique -o
-              └─ yes → fugu-train smoke on this buffer
-                         └─ then larger multi-strategy collect → real train → eval
-```
-
-#### What’s next after a healthy `-n 20`
-
-**1. Train smoke** (CUDA torch required; proves SFT path — not paper quality):
+`fugu-train -b DIR` loads **one** directory. Merge several healthy runs into a new unique folder:
 
 ```bash
-fugu-train -c configs/default.yaml -b data/buffer_lcb_train
+python - <<'PY'
+from pathlib import Path
+from fugu.buffer.replay_buffer import ReplayBuffer
+
+# EDIT: list only the buffer dirs you verified as healthy
+sources = [
+    "data/buffer_lcb_ornith_YYYYMMDD_HHMMSS",
+    "data/buffer_lcb_escalate_YYYYMMDD_HHMMSS",
+    "data/buffer_lcb_qwen_YYYYMMDD_HHMMSS",
+]
+# Unique merge output (do not overwrite older merges)
+from datetime import datetime
+out = Path("data/buffer_lcb_train_merged_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+out.mkdir(parents=True, exist_ok=True)
+
+merged = ReplayBuffer(capacity=200_000, storage_dir=str(out))
+for d in sources:
+    p = Path(d) / "buffer.jsonl"
+    if not p.exists():
+        print("skip missing", p)
+        continue
+    b = ReplayBuffer(capacity=200_000, storage_dir=d)
+    b.load(str(p))
+    for t in b:
+        merged.add(t)
+    print(d, "->", len(b), "transitions")
+merged.save(str(out / "buffer.jsonl"))
+print("MERGED", len(merged), "->", out / "buffer.jsonl")
+print("Train with: fugu-train -c configs/default.yaml -b", out)
+PY
+```
+
+### 7. Train on the merged buffer
+
+```bash
+fugu-train -c configs/default.yaml -b data/buffer_lcb_train_merged_YYYYMMDD_HHMMSS
 # adapter under outputs/planner/ (or training.output_dir)
 ```
 
-**2. Scale collect** for real BC data (unique `-o` per chunk; optional strategies):
+### 8. Eval (held-out; after a real train)
 
 ```bash
-fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen_a
-fugu-collect -d livecodebench-train -s retry-on-fail -n 10 -o data/buffer_lcb_retry_a
-fugu-collect -d livecodebench-train -s round-robin -n 10 -o data/buffer_lcb_rr_a
+fugu-eval -a outputs/planner/final_adapter -d livecodebench-val -n 50
+# later: -d livecodebench-test
 ```
 
-**3. Eval** after a non-toy train (same workers / budget as baselines):
+Compare learned planner to fixed strategies on **success** and **expensive (Qwen) call rate**.
 
-```bash
-fugu-eval -a outputs/planner/final_adapter -d livecodebench-val -n 10
-# later: livecodebench-test
+### Decision tree (production)
+
+```text
+Smoke -n 1 OK?
+  └─ yes → Production collect (Stage 6b)
+              ├─ multi-strategy, unique -o each run
+              ├─ analyze each buffer
+              ├─ merge healthy dirs
+              ├─ fugu-train on merge
+              └─ fugu-eval on val/test
 ```
-
-#### If analysis looks bad — fix before train
-
-| Symptom | Likely fix |
-|---------|------------|
-| `No module named pytest` | Rebuild/use `fugu-py311-pytest`; `FUGU_ENV__DOCKER_IMAGE=...` |
-| Permission denied under `/workspace` | `unset FUGU_ENV__DOCKER_USER` or `uid:gid` + chown |
-| SyntaxError / empty solution | Confirm LCB path + `code_format=python` (post-LCB commits) |
-| Always 0 tests | Dual harness / empty public_tests — check one dir under `/tmp/fugu_workspaces` |
-| Hung mid-run | Chunk `-n 10`, raise timeouts, check vLLM logs |
-| 0 transitions | Collect failed early — reread collect log / screen scrollback |
 
 ---
 
@@ -458,9 +548,10 @@ fugu-train -c configs/default.yaml -b data/buffer_lcb_train
 - [ ] `fugu-py311-pytest` built (after any image delete)
 - [ ] Worker URLs; Fugu config shows docker + image
 - [ ] `fugu-collect -d livecodebench-train -n 1` OK
-- [ ] `-n 20` (or chunked) collect finished; **buffer summary script** healthy
-- [ ] `fugu-train` smoke on that buffer
-- [ ] Larger multi-strategy collect → real train → `fugu-eval`
+- [ ] Production collect (Stage 6b): multi-strategy, **unique `-o` with `$(date …)` every run**
+- [ ] Analyze each buffer; merge healthy ones
+- [ ] `fugu-train` on merged buffer
+- [ ] `fugu-eval` on val/test
 - [ ] (Optional) planner CUDA load; pip freeze
 
 ---
