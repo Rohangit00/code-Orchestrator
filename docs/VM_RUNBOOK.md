@@ -17,7 +17,8 @@ Tip commit for LCB: **`6465c4f`** or later on `main`.
 |------|--------|
 | Unit tests (57) | Yes |
 | LCB collect smoke (`-n 1`) | Yes after image + workers |
-| LCB train from buffer | Yes after non-empty buffer + CUDA torch |
+| LCB scale collect (`-n 20`) | Yes; **analyze buffer** before train (Stage 6) |
+| LCB train from buffer | Yes after healthy buffer summary + CUDA torch |
 | Full SWE-bench Lite @ official harness | Separate tool (`swebench`); lots of disk if scaled |
 | Host execution of untrusted git tests | No — keep `allow_host_execution: false` |
 
@@ -195,11 +196,21 @@ fugu-collect \
   -o "data/buffer_lcb_smoke_$(date +%Y%m%d_%H%M%S)"
 ```
 
-### Scale then train
+### Scale (`-n 20`) then analyze before train
 
 ```bash
 fugu-collect -d livecodebench-train -s single-qwen -n 20 -o data/buffer_lcb_train
-fugu-train -c configs/default.yaml -b data/buffer_lcb_train
+```
+
+**Do not jump straight to train** until you have checked the buffer (next subsection).
+A tiny 20-task buffer is for **pipeline smoke** (collect finished + labels sane), not paper numbers.
+
+If long runs hang (e.g. after ~12 tasks), chunk and raise timeouts:
+
+```bash
+fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen_a
+fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen_b
+# raise worker / docker test timeouts via config or FUGU_* if needed
 ```
 
 ### What `fugu-collect` does (LCB)
@@ -246,6 +257,167 @@ LCB workspaces live under `repo.workspace_dir` (default `/tmp/fugu_workspaces`) 
 | Real pytest output | Permission denied on mount |
 | Some tests pass/fail counts | Always empty zero tests |
 
+### Analyze `-n 20` (or any) buffer
+
+`buffer.jsonl` is **binary** (`FUGU_RB` + msgpack + zstd). Do not `cat` it.
+`data/` is gitignored (often grey in IDEs) — use the terminal.
+
+```bash
+ls -lah data/buffer_lcb_train/
+file data/buffer_lcb_train/buffer.jsonl
+```
+
+**Full summary script** (repo root, venv active). Change `path` if you used a different `-o`:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from collections import Counter
+from fugu.buffer.replay_buffer import ReplayBuffer
+from fugu.training.filter import group_episodes, episode_return, episode_solved
+
+path = Path("data/buffer_lcb_train/buffer.jsonl")  # change if needed
+assert path.exists(), path
+
+buf = ReplayBuffer(capacity=100_000, storage_dir=str(path.parent))
+buf.load(str(path))
+transitions = list(buf)
+
+print("=== BUFFER ===")
+print(f"transitions: {len(transitions)}")
+print(f"file size:   {path.stat().st_size / 1e6:.2f} MB")
+
+actions = Counter(t.action.name for t in transitions)
+print("\n=== ACTIONS ===")
+for k, v in actions.most_common():
+    print(f"  {k:12s} {v}")
+
+eps = group_episodes(transitions)
+print(f"\n=== EPISODES ===")
+print(f"episodes: {len(eps)}  (expect ~20 if -n 20 finished)")
+
+solved = 0
+returns = []
+steps = []
+rows = []
+for i, ep in enumerate(eps):
+    ret = episode_return(ep)
+    ok = episode_solved(ep)
+    solved += int(ok)
+    returns.append(ret)
+    steps.append(len(ep))
+    last = ep[-1]
+    ta = last.metadata.tests_after
+    p = f = e = 0
+    out = ""
+    if ta is not None:
+        p, f, e = ta.passed, ta.failed, ta.errors
+        out = (ta.output or "")[:120].replace("\n", " ")
+    tid = getattr(last.state, "task_id", "") or getattr(last.metadata, "task_id", "") or "?"
+    rows.append((i, tid, len(ep), ret, ok, p, f, e, out))
+
+print(f"solved (all public tests pass at end): {solved}/{len(eps)}")
+if returns:
+    print(f"return: mean={sum(returns)/len(returns):.3f}  "
+          f"min={min(returns):.3f}  max={max(returns):.3f}")
+    print(f"steps/ep: mean={sum(steps)/len(steps):.1f}  max={max(steps)}")
+
+print("\n#  task_id                    steps   return  solved  p/f/e  tail output")
+for i, tid, n, ret, ok, p, f, e, out in rows:
+    print(f"{i:2d}  {str(tid)[:24]:24s}  {n:3d}  {ret:7.2f}  {ok!s:5s}  "
+          f"{p}/{f}/{e}  {out[:80]}")
+
+bad = 0
+for t in transitions:
+    ta = t.metadata.tests_after
+    if ta and ("No module named pytest" in (ta.output or "")
+               or "Permission denied" in (ta.output or "")):
+        bad += 1
+print(f"\ntransitions with pytest-missing or permission errors: {bad}")
+
+from fugu.training.filter import filter_transitions
+kept = filter_transitions(transitions, min_return=0.0)
+print(f"kept after min_return=0: {len(kept)} / {len(transitions)}")
+PY
+```
+
+`fugu-collect` also prints a **Collection Summary** (transition count, elapsed, path) when the job finishes. If that table never appeared, the job was killed/timed out — the buffer may still load with fewer episodes.
+
+#### How to read the numbers
+
+| Signal | Healthy `-n 20` | Unhealthy |
+|--------|-----------------|-----------|
+| **Episodes** | ≈ 20 (or slightly fewer if one task crashed) | 0, or hung midway (e.g. stop at ~12) |
+| **Transitions** | A few × episodes (CALL → tests → RETRY* → STOP) | 0 |
+| **Actions** | Mix of `CALL_QWEN`, maybe `RETRY`, `STOP` | Only `STOP`, or never `CALL_*` |
+| **Solved rate** | Can be low (contest hard + single worker); even **0/20** can still train if tests ran | N/A for “smoke OK” |
+| **Return** | Some positive (test Δ / terminal +2) | All ~0 with empty tests |
+| **Test output** | Real pytest pass/fail | `No module named pytest`, always empty, permission errors |
+| **SyntaxError on solution** | Rare after `code_format=python` | Many → worker still emitting diffs |
+
+**Smoke success ≠ high solve rate.** For `-n 20` you mainly want:
+
+1. Run **finished** (≈20 episodes, not stuck after ~12).  
+2. **Transitions &gt; 0**.  
+3. Tests **actually ran** (p/f/e not always 0/0/0 with empty output).  
+4. **No systemic harness bugs** (pytest missing, docker perms, pure-diff SyntaxError).
+
+#### Practical bar: good enough to train on this buffer
+
+- ≥ ~15 episodes completed  
+- Transitions &gt; 0  
+- 0 systemic pytest/permission errors  
+- Some episodes with **non-zero** test counts  
+- Ideally ≥1 positive return (not required)
+
+**Do not train** on buffers full of pytest-missing / permission garbage — labels are wrong.
+
+#### Decision tree
+
+```text
+-n 20 finished?
+  ├─ no  → fix hang/timeouts; re-collect in chunks with unique -o
+  └─ yes → tests real + transitions > 0?
+              ├─ no  → fix docker/image/format; re-collect unique -o
+              └─ yes → fugu-train smoke on this buffer
+                         └─ then larger multi-strategy collect → real train → eval
+```
+
+#### What’s next after a healthy `-n 20`
+
+**1. Train smoke** (CUDA torch required; proves SFT path — not paper quality):
+
+```bash
+fugu-train -c configs/default.yaml -b data/buffer_lcb_train
+# adapter under outputs/planner/ (or training.output_dir)
+```
+
+**2. Scale collect** for real BC data (unique `-o` per chunk; optional strategies):
+
+```bash
+fugu-collect -d livecodebench-train -s single-qwen -n 10 -o data/buffer_lcb_qwen_a
+fugu-collect -d livecodebench-train -s retry-on-fail -n 10 -o data/buffer_lcb_retry_a
+fugu-collect -d livecodebench-train -s round-robin -n 10 -o data/buffer_lcb_rr_a
+```
+
+**3. Eval** after a non-toy train (same workers / budget as baselines):
+
+```bash
+fugu-eval -a outputs/planner/final_adapter -d livecodebench-val -n 10
+# later: livecodebench-test
+```
+
+#### If analysis looks bad — fix before train
+
+| Symptom | Likely fix |
+|---------|------------|
+| `No module named pytest` | Rebuild/use `fugu-py311-pytest`; `FUGU_ENV__DOCKER_IMAGE=...` |
+| Permission denied under `/workspace` | `unset FUGU_ENV__DOCKER_USER` or `uid:gid` + chown |
+| SyntaxError / empty solution | Confirm LCB path + `code_format=python` (post-LCB commits) |
+| Always 0 tests | Dual harness / empty public_tests — check one dir under `/tmp/fugu_workspaces` |
+| Hung mid-run | Chunk `-n 10`, raise timeouts, check vLLM logs |
+| 0 transitions | Collect failed early — reread collect log / screen scrollback |
+
 ---
 
 ## Stage 7 — Optional SWE-bench (not primary)
@@ -263,9 +435,12 @@ Official resolve rates: separate `pip install swebench` + `run_evaluation` (disk
 
 ## Stage 8 — Train / eval planner
 
+Only after Stage 6 **Analyze `-n 20`** looks healthy (or larger buffers).
+
 ```bash
 fugu-train -c configs/default.yaml -b data/buffer_lcb_train
-# fugu-eval -a outputs/planner/final_adapter -d livecodebench-test -n 10
+# fugu-eval -a outputs/planner/final_adapter -d livecodebench-val -n 10
+# later: -d livecodebench-test
 ```
 
 ---
@@ -278,7 +453,9 @@ fugu-train -c configs/default.yaml -b data/buffer_lcb_train
 - [ ] `fugu-py311-pytest` built (after any image delete)
 - [ ] Worker URLs; Fugu config shows docker + image
 - [ ] `fugu-collect -d livecodebench-train -n 1` OK
-- [ ] Larger collect + `fugu-train`
+- [ ] `-n 20` (or chunked) collect finished; **buffer summary script** healthy
+- [ ] `fugu-train` smoke on that buffer
+- [ ] Larger multi-strategy collect → real train → `fugu-eval`
 - [ ] (Optional) planner CUDA load; pip freeze
 
 ---
