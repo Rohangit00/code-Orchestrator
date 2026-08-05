@@ -492,14 +492,48 @@ fugu-train -c configs/default.yaml -b data/buffer_lcb_train_merged_YYYYMMDD_HHMM
 # adapter under outputs/planner/ (or training.output_dir)
 ```
 
-### 8. Eval (held-out; after a real train)
+### 8. Eval baselines (before train) and planner (after train)
+
+**Data leak:** Running baselines on **`livecodebench-test`** does **not** train the planner or fine-tune workers. Workers are **inference-only**. As long as you **do not** put test/val trajectories into the **train buffer** for SFT, there is **no planner leakage**. (Separate issue: worker pretraining contamination is what LCB time-splits address; not caused by your eval.)
+
+**Do not** merge baseline eval runs into `buffer_lcb_train_*`. Eval writes **JSON results**, not training buffers (unless you deliberately collect on test).
+
+#### Baselines (no adapter — run **before** train)
+
+Same workers, docker, `-n`, and split for every method. Prefer **val** first; **test** for final numbers.
 
 ```bash
-fugu-eval -a outputs/planner/final_adapter -d livecodebench-val -n 50
+# Unique -o each run
+N=50
+SPLIT=livecodebench-val   # or livecodebench-test for final baselines
+
+fugu-eval -c configs/default.yaml -s single-ornith -d $SPLIT -n $N \
+  -o "results/baseline_ornith_${SPLIT}_$(date +%Y%m%d_%H%M%S).json"
+
+fugu-eval -c configs/default.yaml -s single-qwen -d $SPLIT -n $N \
+  -o "results/baseline_qwen_${SPLIT}_$(date +%Y%m%d_%H%M%S).json"
+
+fugu-eval -c configs/default.yaml -s retry-on-fail -d $SPLIT -n $N \
+  -o "results/baseline_escalate_${SPLIT}_$(date +%Y%m%d_%H%M%S).json"
+
+# optional
+fugu-eval -c configs/default.yaml -s round-robin -d $SPLIT -n $N \
+  -o "results/baseline_rr_${SPLIT}_$(date +%Y%m%d_%H%M%S).json"
+```
+
+Each JSON has `aggregate.task_pass_rate`, `avg_call_qwen`, `avg_call_ornith`, `avg_steps`, etc.
+
+#### Learned planner (after train)
+
+```bash
+fugu-eval -c configs/default.yaml \
+  -a outputs/planner/final_adapter \
+  -d livecodebench-val -n 50 \
+  -o "results/planner_val_$(date +%Y%m%d_%H%M%S).json"
 # later: -d livecodebench-test
 ```
 
-Compare learned planner to fixed strategies on **success** and **expensive (Qwen) call rate**.
+Compare planner vs baselines on **success** and **avg CALL_QWEN** (cost proxy).
 
 ### Decision tree (production)
 
@@ -550,8 +584,10 @@ fugu-train -c configs/default.yaml -b data/buffer_lcb_train
 - [ ] `fugu-collect -d livecodebench-train -n 1` OK
 - [ ] Production collect (Stage 6b): multi-strategy, **unique `-o` with `$(date …)` every run**
 - [ ] Analyze each buffer; merge healthy ones
-- [ ] `fugu-train` on merged buffer
-- [ ] `fugu-eval` on val/test
+- [ ] Baseline `fugu-eval -s …` on val (and optionally test) **before** train
+- [ ] Merge train buffers only (never test/val collect into train)
+- [ ] `fugu-train` on merged **train** buffer
+- [ ] `fugu-eval -a …` planner on val/test vs baseline JSONs
 - [ ] (Optional) planner CUDA load; pip freeze
 
 ---

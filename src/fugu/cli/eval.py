@@ -1,13 +1,15 @@
-"""CLI entry-point: ``fugu-eval`` — planner evaluation.
+"""CLI entry-point: ``fugu-eval`` — planner or fixed-strategy evaluation.
 
-Evaluates a trained planner adapter against a benchmark dataset by
-running episodes where the planner's predicted actions drive the coding
-environment, then aggregates and reports performance metrics.
+Two modes:
 
-Usage::
+* **Planner** (after train)::
 
-    fugu-eval -a outputs/planner/final_adapter -d swebench-lite
-    fugu-eval -a outputs/planner/final_adapter -d swebench-verified -n 50 -o results.json
+      fugu-eval -a outputs/planner/final_adapter -d livecodebench-val -n 50
+
+* **Baseline strategy** (before train; no adapter)::
+
+      fugu-eval -s single-ornith -d livecodebench-test -n 50 \\
+        -o results/baseline_ornith_test.json
 
 Primary dataset: LiveCodeBench (Python). SWE-bench variants remain available.
 """
@@ -19,6 +21,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any, Protocol
 
 import click
 from rich.console import Console
@@ -75,6 +78,18 @@ _DATASET_MAP: dict[str, tuple[str, str, dict]] = {
 
 _SUPPORTED_DATASETS = tuple(_DATASET_MAP.keys())
 
+_STRATEGY_CLI_CHOICES = (
+    "single-qwen",
+    "single-ornith",
+    "round-robin",
+    "retry-on-fail",
+    "verify-first",
+)
+
+
+class _ActionPolicy(Protocol):
+    def select(self, state: Any, step: int) -> Any: ...
+
 
 def _load_dataset(name: str):
     """Dynamically import and instantiate a benchmark dataset."""
@@ -86,19 +101,73 @@ def _load_dataset(name: str):
     return cls(**kwargs)
 
 
-async def _evaluate_task(env, planner, task) -> dict:
-    """Run a single episode with the planner driving action selection.
+def _load_strategy(strategy_name: str):
+    """Build one fixed strategy from a CLI name (same mapping as collect)."""
+    from fugu.core.actions import PlannerAction
+    from fugu.trajectory.strategies import (
+        RoundRobinStrategy,
+        RetryOnFailStrategy,
+        SingleWorkerStrategy,
+        VerifyFirstStrategy,
+    )
 
-    Returns a dict with task-level metrics.
-    """
+    key = strategy_name.strip().lower().replace("_", "-")
+    factories = {
+        "single-qwen": lambda: SingleWorkerStrategy(
+            PlannerAction.CALL_QWEN, max_retries=2
+        ),
+        "single-ornith": lambda: SingleWorkerStrategy(
+            PlannerAction.CALL_ORNITH, max_retries=2
+        ),
+        "round-robin": RoundRobinStrategy,
+        "retry-on-fail": lambda: RetryOnFailStrategy(
+            primary_action=PlannerAction.CALL_ORNITH,
+            max_retries=2,
+            fallback_actions=[PlannerAction.CALL_QWEN],
+        ),
+        "verify-first": lambda: VerifyFirstStrategy(PlannerAction.CALL_ORNITH),
+    }
+    if key not in factories:
+        raise click.ClickException(
+            f"Unknown strategy {strategy_name!r}. "
+            f"Choose from: {', '.join(_STRATEGY_CLI_CHOICES)}"
+        )
+    return factories[key]()
+
+
+class _PlannerPolicy:
+    """Wraps PlannerModel.predict for the shared episode loop."""
+
+    def __init__(self, planner: Any) -> None:
+        self._planner = planner
+
+    def select(self, state: Any, step: int) -> Any:
+        return self._planner.predict(state)
+
+
+class _StrategyPolicy:
+    """Wraps a fixed BaseStrategy."""
+
+    def __init__(self, strategy: Any) -> None:
+        self._strategy = strategy
+
+    def select(self, state: Any, step: int) -> Any:
+        return self._strategy.select_action(state, step)
+
+
+async def _evaluate_task(env: Any, policy: _ActionPolicy, task: Any) -> dict:
+    """Run one episode with *policy* choosing actions."""
+    from collections import Counter
+
     state = env.reset(task)
     total_reward = 0.0
     steps = 0
     actions_taken: list[str] = []
     all_tests_passed = False
+    max_steps = getattr(env, "_max_steps", 20)
 
-    while True:
-        action = planner.predict(state)
+    while steps < max_steps:
+        action = policy.select(state, steps)
         actions_taken.append(action.name)
 
         state, reward, done, info = await env.step(action)
@@ -111,15 +180,19 @@ async def _evaluate_task(env, planner, task) -> dict:
 
     env.close()
 
+    action_counts = dict(Counter(actions_taken))
     return {
         "task_id": getattr(task, "task_id", "unknown"),
         "steps": steps,
         "total_reward": total_reward,
         "all_tests_passed": all_tests_passed,
         "actions": actions_taken,
+        "action_counts": action_counts,
+        "n_call_qwen": action_counts.get("CALL_QWEN", 0),
+        "n_call_ornith": action_counts.get("CALL_ORNITH", 0),
         "final_pass_rate": (
             state.test_results.pass_rate
-            if state.test_results is not None
+            if state is not None and state.test_results is not None
             else 0.0
         ),
     }
@@ -135,14 +208,21 @@ async def _evaluate_task(env, planner, task) -> dict:
 @click.option(
     "--adapter",
     "-a",
-    required=True,
-    help="Path to the trained LoRA adapter directory.",
+    default=None,
+    help="Path to trained LoRA adapter (planner mode). Omit for baseline -s.",
+)
+@click.option(
+    "--strategy",
+    "-s",
+    type=click.Choice(list(_STRATEGY_CLI_CHOICES), case_sensitive=False),
+    default=None,
+    help="Fixed baseline strategy (no adapter). e.g. single-ornith, single-qwen.",
 )
 @click.option(
     "--dataset",
     "-d",
     type=click.Choice(_SUPPORTED_DATASETS, case_sensitive=False),
-    default="livecodebench-test",
+    default="livecodebench-val",
     help="Dataset: livecodebench[-train|-val|-test] or swebench-*.",
 )
 @click.option(
@@ -155,53 +235,81 @@ async def _evaluate_task(env, planner, task) -> dict:
 @click.option(
     "--output",
     "-o",
-    default="outputs/eval_results.json",
-    help="Output path for evaluation results JSON.",
+    default=None,
+    help="Output JSON path (default under results/ with mode + dataset stamp).",
 )
 def main(
     config: str,
-    adapter: str,
+    adapter: str | None,
+    strategy: str | None,
     dataset: str,
     max_tasks: int | None,
-    output: str,
+    output: str | None,
 ) -> None:
-    """Evaluate a trained planner adapter against a benchmark dataset."""
+    """Evaluate a planner adapter or a fixed baseline strategy."""
+    if adapter and strategy:
+        raise click.ClickException(
+            "Pass either -a/--adapter (planner) or -s/--strategy (baseline), not both."
+        )
+    if not adapter and not strategy:
+        raise click.ClickException(
+            "Pass -a/--adapter for the learned planner, or -s/--strategy for a "
+            "baseline (e.g. -s single-ornith)."
+        )
+
+    mode = "planner" if adapter else "baseline"
     console.print(
         Panel.fit(
-            "[bold blue]Fugu Planner Evaluator[/bold blue]",
+            f"[bold blue]Fugu Evaluator[/bold blue] ({mode})",
             border_style="blue",
         )
     )
 
-    # ── Load configuration ──────────────────────────────────────────
     from fugu.config import FuguConfig
 
     cfg = FuguConfig.from_yaml(config)
 
+    if output is None:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        tag = "planner" if adapter else (strategy or "baseline")
+        output = f"results/eval_{tag}_{dataset}_{stamp}.json"
+
     console.print(f"  Config    : [green]{config}[/green]")
-    console.print(f"  Adapter   : [green]{adapter}[/green]")
+    console.print(f"  Mode      : [green]{mode}[/green]")
+    if adapter:
+        console.print(f"  Adapter   : [green]{adapter}[/green]")
+    if strategy:
+        console.print(f"  Strategy  : [green]{strategy}[/green]")
     console.print(f"  Dataset   : [green]{dataset}[/green]")
     console.print(f"  Max tasks : [green]{max_tasks or 'all'}[/green]")
     console.print(f"  Output    : [green]{output}[/green]")
     console.print()
 
-    # ── Load planner model + adapter ────────────────────────────────
-    from fugu.planner.model import PlannerModel
+    # ── Policy ──────────────────────────────────────────────────────
+    policy: _ActionPolicy
+    if adapter:
+        from fugu.planner.model import PlannerModel
 
-    with console.status(
-        f"[bold yellow]Loading model: {cfg.planner.base_model}…[/bold yellow]"
-    ):
-        planner = PlannerModel(cfg.planner)
-        planner.load()
+        with console.status(
+            f"[bold yellow]Loading model: {cfg.planner.base_model}…[/bold yellow]"
+        ):
+            planner = PlannerModel(cfg.planner)
+            planner.load()
+        with console.status(
+            f"[bold yellow]Loading adapter: {adapter}…[/bold yellow]"
+        ):
+            planner.load_adapter(adapter)
+        console.print("[green]✓[/green] Model and adapter loaded\n")
+        policy = _PlannerPolicy(planner)
+    else:
+        strat = _load_strategy(strategy or "single-ornith")
+        console.print(
+            f"[green]✓[/green] Baseline strategy: "
+            f"[cyan]{getattr(strat, 'name', strategy)}[/cyan]\n"
+        )
+        policy = _StrategyPolicy(strat)
 
-    with console.status(
-        f"[bold yellow]Loading adapter: {adapter}…[/bold yellow]"
-    ):
-        planner.load_adapter(adapter)
-
-    console.print("[green]✓[/green] Model and adapter loaded\n")
-
-    # ── Build environment ───────────────────────────────────────────
+    # ── Environment ─────────────────────────────────────────────────
     with console.status("[bold yellow]Initialising environment…[/bold yellow]"):
         from fugu.core.reward import RewardCalculator
         from fugu.env.coding_env import CodingEnvironment
@@ -226,30 +334,28 @@ def main(
             docker_user=cfg.env.docker_user,
             docker_extra_args=cfg.env.docker_extra_args,
         )
-        reward_calculator = RewardCalculator()
         env = CodingEnvironment(
             worker_pool=worker_pool,
             repo_manager=repo_manager,
             test_runner=test_runner,
-            reward_calculator=reward_calculator,
+            reward_calculator=RewardCalculator(),
             max_steps=cfg.env.max_steps,
             cleanup_on_done=cfg.repo.cleanup_on_done,
         )
 
     console.print("[green]✓[/green] Environment initialised\n")
 
-    # ── Load dataset ────────────────────────────────────────────────
+    # ── Dataset ─────────────────────────────────────────────────────
     with console.status(f"[bold yellow]Loading dataset '{dataset}'…[/bold yellow]"):
         ds = _load_dataset(dataset)
 
-    # Get the list of tasks
     tasks = list(ds)
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
 
     console.print(f"[green]✓[/green] Dataset loaded: {len(tasks)} tasks\n")
 
-    # ── Run evaluation ──────────────────────────────────────────────
+    # ── Run ─────────────────────────────────────────────────────────
     results: list[dict] = []
     start_time = time.monotonic()
 
@@ -261,9 +367,7 @@ def main(
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        eval_task = progress.add_task(
-            "Evaluating tasks…", total=len(tasks)
-        )
+        eval_task = progress.add_task("Evaluating tasks…", total=len(tasks))
 
         for i, task in enumerate(tasks):
             task_id = getattr(task, "task_id", f"task_{i}")
@@ -273,14 +377,10 @@ def main(
             )
 
             try:
-                task_result = asyncio.run(
-                    _evaluate_task(env, planner, task)
-                )
+                task_result = asyncio.run(_evaluate_task(env, policy, task))
                 results.append(task_result)
             except Exception as exc:
-                console.print(
-                    f"  [red]✗[/red] Task {task_id} failed: {exc}"
-                )
+                console.print(f"  [red]✗[/red] Task {task_id} failed: {exc}")
                 results.append(
                     {
                         "task_id": task_id,
@@ -288,6 +388,9 @@ def main(
                         "total_reward": 0.0,
                         "all_tests_passed": False,
                         "actions": [],
+                        "action_counts": {},
+                        "n_call_qwen": 0,
+                        "n_call_ornith": 0,
                         "final_pass_rate": 0.0,
                         "error": str(exc),
                     }
@@ -297,64 +400,68 @@ def main(
 
     elapsed = time.monotonic() - start_time
 
-    # ── Compute aggregate metrics ───────────────────────────────────
+    # ── Aggregates ──────────────────────────────────────────────────
     total_tasks = len(results)
     passed_tasks = sum(1 for r in results if r["all_tests_passed"])
-    pass_rate = passed_tasks / total_tasks if total_tasks > 0 else 0.0
+    pass_rate = passed_tasks / total_tasks if total_tasks else 0.0
     avg_reward = (
-        sum(r["total_reward"] for r in results) / total_tasks
-        if total_tasks > 0
-        else 0.0
+        sum(r["total_reward"] for r in results) / total_tasks if total_tasks else 0.0
     )
     avg_steps = (
-        sum(r["steps"] for r in results) / total_tasks
-        if total_tasks > 0
-        else 0.0
+        sum(r["steps"] for r in results) / total_tasks if total_tasks else 0.0
     )
     avg_pass_rate = (
         sum(r["final_pass_rate"] for r in results) / total_tasks
-        if total_tasks > 0
+        if total_tasks
+        else 0.0
+    )
+    avg_qwen = (
+        sum(r.get("n_call_qwen", 0) for r in results) / total_tasks
+        if total_tasks
+        else 0.0
+    )
+    avg_ornith = (
+        sum(r.get("n_call_ornith", 0) for r in results) / total_tasks
+        if total_tasks
         else 0.0
     )
 
-    # Action distribution
     action_counts: dict[str, int] = {}
     for r in results:
         for a in r.get("actions", []):
             action_counts[a] = action_counts.get(a, 0) + 1
 
     aggregate = {
+        "mode": mode,
         "dataset": dataset,
         "adapter": adapter,
+        "strategy": strategy,
         "total_tasks": total_tasks,
         "passed_tasks": passed_tasks,
         "task_pass_rate": pass_rate,
         "avg_reward": avg_reward,
         "avg_steps": avg_steps,
         "avg_test_pass_rate": avg_pass_rate,
+        "avg_call_qwen": avg_qwen,
+        "avg_call_ornith": avg_ornith,
         "action_distribution": action_counts,
         "elapsed_seconds": elapsed,
     }
 
-    # ── Save results ────────────────────────────────────────────────
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    full_results = {
-        "aggregate": aggregate,
-        "per_task": results,
-    }
-
     with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump(full_results, fh, indent=2, default=str)
+        json.dump({"aggregate": aggregate, "per_task": results}, fh, indent=2, default=str)
 
-    # ── Display summary ─────────────────────────────────────────────
     summary_table = Table(title="Evaluation Results", show_header=False)
     summary_table.add_column("Metric", style="bold")
     summary_table.add_column("Value", style="cyan")
-
+    summary_table.add_row("Mode", mode)
     summary_table.add_row("Dataset", dataset)
-    summary_table.add_row("Adapter", adapter)
+    if adapter:
+        summary_table.add_row("Adapter", adapter)
+    if strategy:
+        summary_table.add_row("Strategy", strategy)
     summary_table.add_row("Total tasks", str(total_tasks))
     summary_table.add_row(
         "Tasks solved",
@@ -362,26 +469,25 @@ def main(
     )
     summary_table.add_row("Avg reward", f"{avg_reward:.4f}")
     summary_table.add_row("Avg steps", f"{avg_steps:.1f}")
+    summary_table.add_row("Avg CALL_QWEN / task", f"{avg_qwen:.2f}")
+    summary_table.add_row("Avg CALL_ORNITH / task", f"{avg_ornith:.2f}")
     summary_table.add_row("Avg test pass rate", f"{avg_pass_rate:.1%}")
     summary_table.add_row("Elapsed time", f"{elapsed:.1f}s")
 
     console.print()
     console.print(summary_table)
 
-    # Action distribution table
     if action_counts:
         action_table = Table(title="Action Distribution")
         action_table.add_column("Action", style="bold")
         action_table.add_column("Count", justify="right", style="cyan")
         action_table.add_column("Percentage", justify="right", style="green")
-
         total_actions = sum(action_counts.values())
         for action_name, count in sorted(
             action_counts.items(), key=lambda x: x[1], reverse=True
         ):
-            pct = count / total_actions * 100 if total_actions > 0 else 0.0
+            pct = count / total_actions * 100 if total_actions else 0.0
             action_table.add_row(action_name, str(count), f"{pct:.1f}%")
-
         console.print()
         console.print(action_table)
 
